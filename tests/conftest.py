@@ -205,3 +205,14 @@ def sin_push_ni_tareas_colgadas(monkeypatch):
     yield
     push._tareas.clear()
     correo_espejo._tareas.clear()
+
+
+@pytest.fixture(autouse=True)
+def _sin_principal_de_gerencia(monkeypatch):
+    """
+    El .env real puede traer GERENCIA_PRINCIPAL_EMAIL; los tests que no hablan del
+    principal no deben depender de él. Los que sí, lo fijan con su propio monkeypatch.
+    """
+    from config import settings
+
+    monkeypatch.setattr(settings, "GERENCIA_PRINCIPAL_EMAIL", "")

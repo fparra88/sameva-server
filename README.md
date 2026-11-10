@@ -951,16 +951,22 @@ no mezclarlas:
 | Alcance | **su** tenant | todos los tenants |
 | Para qué | configurar su negocio | administrar el servicio |
 
-La **primera** persona se da de alta por SQL (no hay nadie que pueda
-hacerlo desde el panel todavía); de ahí en adelante, desde `/gerencia/equipo`:
+La **primera** persona (la principal) sale del `.env`: con
+`GERENCIA_PRINCIPAL_EMAIL` (+ `_NOMBRE`, `_CARGO`) se crea en `gerencia_users`
+al arrancar si falta (idempotente, no pisa lo que ya exista). Es la única que
+agrega o quita al resto desde `/gerencia/equipo`; los demás ven la lista.
+Cambiar el correo del `.env` no borra al principal anterior: queda como
+miembro común. Sin la variable, cualquier gerencia administra el equipo.
+Sigue siendo posible el alta por SQL si hiciera falta:
 
 ```sql
 INSERT INTO gerencia_users (email, full_name, cargo)
 VALUES ('alguien@operativai.com.mx', 'Nombre Apellido', 'Operaciones');
 ```
 
-Nadie puede quitarse el nivel a sí mismo, así que la tabla nunca queda
-vacía desde el panel.
+La persona además necesita cuenta de portal con ese correo (registro normal o
+Google). Nadie puede quitarse el nivel a sí mismo ni quitar al principal, así
+que la tabla nunca queda vacía desde el panel.
 
 Se resuelve por `LOWER(email)` contra el `portal_users` de la sesión, así
 que quien entra sigue autenticándose con su cuenta de siempre (o con
@@ -985,8 +991,8 @@ JOIN en cada request.
 | GET | `/gerencia/auditoria?tenant_id=&accion=&limite=` | Bitácora, solo lectura |
 | GET | `/gerencia/salud` | Problemas operativos de ahora + alertas de plataforma abiertas |
 | PATCH | `/gerencia/alertas/{id}/revisar` | Cierra una alerta de plataforma |
-| GET/POST | `/gerencia/usuarios` | Equipo de plataforma (`gerencia_users`) |
-| DELETE | `/gerencia/usuarios/{id}` | Quita el nivel (nunca a uno mismo) |
+| GET/POST | `/gerencia/usuarios` | Equipo de plataforma (`gerencia_users`). GET: cualquier gerencia; POST: solo la principal |
+| DELETE | `/gerencia/usuarios/{id}` | Quita el nivel (solo la principal; nunca a uno mismo) |
 | GET | `/gerencia/cohortes?meses=` | Retención mensual por mes de alta |
 | POST | `/gerencia/tenants/{id}/impersonar` | Token de "ver como el negocio", solo lectura |
 | GET/POST | `/gerencia/planes` | Catálogo de planes (activos e inactivos) |

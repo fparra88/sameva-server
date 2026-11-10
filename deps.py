@@ -413,6 +413,24 @@ async def gerencia_plataforma_actual(
     return usuario
 
 
+async def gerencia_principal_actual(
+    usuario: UsuarioActual = Depends(gerencia_plataforma_actual),
+) -> UsuarioActual:
+    """
+    Administrar el equipo de plataforma (alta y baja de gerencia_users) es de
+    la persona principal definida en GERENCIA_PRINCIPAL_EMAIL. Sin esa variable
+    queda como antes: cualquier gerencia.
+    """
+    from services.gerencia_equipo import puede_administrar_equipo
+
+    if not puede_administrar_equipo(usuario.email):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo la persona principal de gerencia puede administrar el equipo",
+        )
+    return usuario
+
+
 @dataclass
 class VendedorActual:
     """El vendedor detrás del portal_user que está llamando."""

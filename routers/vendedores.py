@@ -870,6 +870,34 @@ async def cambiar_estado(
     return resultado
 
 
+@router_pipeline.get("/{user_id}", response_model=PipelineOut)
+async def lead_de_contacto(
+    user_id: UUID,
+    tenant_id: UUID = Depends(modulo_actual),
+    usuario: UsuarioActual = Depends(usuario_actual),
+):
+    """
+    El lead de UN contacto (la ficha CRM dentro de la conversación). 404 si
+    todavía no está en el embudo; un vendedor solo ve los suyos (403).
+    """
+    propio = await _vendedor_propio(usuario)
+    fila = await fetch_one(
+        f"""
+        {_SELECT_PIPELINE}
+        WHERE p.tenant_id = $1 AND p.user_id = $2
+        """,
+        tenant_id,
+        user_id,
+    )
+    if fila is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Este contacto no está en el embudo",
+        )
+    _solo_lo_suyo(propio, fila["vendedor_id"])
+    return _a_pipeline_out(fila)
+
+
 @router_pipeline.get("/{user_id}/historial", response_model=list[HistorialOut])
 async def historial_cliente(
     user_id: UUID,

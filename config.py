@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from dotenv import load_dotenv
@@ -82,6 +83,14 @@ class Settings:
     # phone_number_id de Meta (agentes_canal.phone_number_id) cuyas conversaciones
     # abre /gerencia/conversaciones a todo gerencia_users. Vacío = función apagada.
     GERENCIA_NUMERO_PHONE_NUMBER_ID: str = os.getenv("GERENCIA_NUMERO_PHONE_NUMBER_ID", "").strip()
+
+    # ---- Persona principal de gerencia de plataforma ----
+    # Se crea en gerencia_users al arrancar si falta (services/gerencia_equipo.py)
+    # y es la única que agrega o quita al resto del equipo desde el panel. Vacío =
+    # sin principal: cualquier gerencia administra el equipo (comportamiento previo).
+    GERENCIA_PRINCIPAL_EMAIL: str = os.getenv("GERENCIA_PRINCIPAL_EMAIL", "").strip().lower()
+    GERENCIA_PRINCIPAL_NOMBRE: str = os.getenv("GERENCIA_PRINCIPAL_NOMBRE", "").strip() or "Gerencia principal"
+    GERENCIA_PRINCIPAL_CARGO: str = os.getenv("GERENCIA_PRINCIPAL_CARGO", "").strip() or "Gerencia"
 
     # ---- Avisos de citas por WhatsApp desde la cuenta global (spec 004) ----
     # Se leen en tiempo de petición/pasada (no se copian a constantes de
@@ -615,6 +624,9 @@ class Settings:
             raise RuntimeError(
                 f"Faltan variables de entorno: {', '.join(faltantes)}"
             )
+        principal = self.GERENCIA_PRINCIPAL_EMAIL
+        if principal and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", principal):
+            raise RuntimeError("GERENCIA_PRINCIPAL_EMAIL no es un correo válido")
 
         # El SMTP no se exige: sin él la app arranca igual y los códigos van
         # al log, que es lo cómodo en local. Pero avisa fuerte, porque en un

@@ -60,6 +60,7 @@ from routers import (
     plantillas_whatsapp_tenant,
     perfil,
     pipeline_config,
+    planes_publicos,
     reportes,
     tareas,
     vendedores,
@@ -68,7 +69,7 @@ from routers import (
 
 from config import settings
 from jobs.alertas_background import iniciar_scheduler
-from services import herramientas_calendario
+from services import gerencia_equipo, herramientas_calendario
 from session import close_pool, init_pool
 from realtime import sio
 
@@ -77,6 +78,7 @@ from realtime import sio
 async def lifespan(app: FastAPI):
     settings.validate()
     await init_pool()
+    await gerencia_equipo.sembrar_principal()
     # Negocios que encendieron el calendario antes de que las herramientas
     # del agente se crearan solas; también refresca URL y token.
     await herramientas_calendario.sincronizar_todos()
@@ -143,6 +145,7 @@ app.include_router(dispositivos.router, prefix="/api")
 #   Stripe       -> /api/pagos/stripe/webhook
 #   Mercado Pago -> /api/pagos/webhook  (503 mientras no sea el proveedor)
 app.include_router(pagos.router, prefix="/api")
+app.include_router(planes_publicos.router, prefix="/api")
 app.include_router(pagos_stripe.router, prefix="/api")
 # Cobros propios de cada negocio (Stripe Connect) — ver routers/pagos_connect.py.
 app.include_router(pagos_connect.router, prefix="/api")

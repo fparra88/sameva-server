@@ -76,6 +76,11 @@ TABLAS = [
     ("tenant_token_usage", "portal"),
     ("gerencia_auditoria", "portal"),
     ("gerencia_alertas", "portal"),
+    # Versionadas tarde (sql/52a y 73): existían solo en la base.
+    ("meta_apps", "n8n"),
+    ("usage_events", "n8n"),
+    ("plan_limit_events", "n8n"),
+    ("widget_rate_limit", "n8n"),
 ]
 
 FUNCIONES = [

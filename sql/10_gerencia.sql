@@ -10,8 +10,9 @@
 --
 -- Por eso no hay tenant_id: gerencia no pertenece a un negocio, ve todos.
 --
--- Alta manual por SQL por ahora (no hay endpoint todavía): sirve para
--- dejar sentada la tabla y la validación primero.
+-- La persona principal se crea sola al arrancar la API desde
+-- GERENCIA_PRINCIPAL_EMAIL (.env); el resto lo agrega ella desde
+-- /gerencia/equipo. El INSERT manual de abajo sigue siendo válido.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS gerencia_users (

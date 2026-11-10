@@ -115,20 +115,32 @@ def _headers_mp() -> dict[str, str]:
 # ============================================================
 @router.get("/catalogo", response_model=CatalogoPagosOut)
 async def catalogo(
-    _tenant_id: UUID = Depends(tenant_actual),
+    tenant_id: UUID = Depends(tenant_actual),
     _: UsuarioActual = Depends(negocio_actual),
 ) -> CatalogoPagosOut:
-    """Planes y paquetes de créditos para pintar la pantalla de suscripción."""
+    """
+    Planes y paquetes de créditos para pintar la pantalla de suscripción.
+
+    Los planes activos, más el que este negocio tiene contratado aunque
+    gerencia lo haya apagado (`disponible=false`): si no, su plan vigente
+    desaparecería de su propia pantalla.
+    """
     filas_planes = await fetch_all(
         """
         SELECT nombre, descripcion, precio_monthly, precio_annual,
                max_vendedores, max_proveedores, max_leads_mensuales, creditos_incluidos_mensual,
                agente_ia_activo, gestion_vendedores_activo,
-               herramientas_activo, crm_campo_activo, calendario_activo
+               herramientas_activo, crm_campo_activo, calendario_activo,
+               activo AS disponible
         FROM planes
         WHERE activo
+           OR nombre IN (
+                SELECT plan FROM tenant_subscriptions
+                WHERE tenant_id = $1 AND estado = 'activa'
+           )
         ORDER BY orden, precio_monthly
-        """
+        """,
+        tenant_id,
     )
     filas_paquetes = await fetch_all(
         """

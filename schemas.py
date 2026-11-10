@@ -625,6 +625,9 @@ class AsignacionConversacionOut(BaseModel):
 
 class ConversacionOut(AsignacionConversacionOut):
     id: UUID
+    # El contacto (users.id): llave del lead en el embudo (/pipeline/{user_id}).
+    # Opcional: la vista de gerencia arma estos modelos sin él.
+    user_id: UUID | None = None
     channel_type: str
     status: str
     started_at: datetime
@@ -713,6 +716,9 @@ class AsignableOut(BaseModel):
 
 class ConversacionDetalleOut(AsignacionConversacionOut):
     id: UUID
+    # El contacto (users.id): llave del lead en el embudo (/pipeline/{user_id}).
+    # Opcional: la vista de gerencia arma estos modelos sin él.
+    user_id: UUID | None = None
     channel_type: str
     status: str
     started_at: datetime
@@ -1550,6 +1556,34 @@ class PlanOut(BaseModel):
     herramientas_activo: bool
     crm_campo_activo: bool
     calendario_activo: bool
+    # False = plan apagado por gerencia que este negocio todavía tiene
+    # contratado: se muestra como "actual", pero ya no se ofrece.
+    disponible: bool = True
+
+
+class PlanPublicoOut(BaseModel):
+    """
+    Lo que la landing anónima puede ver de un plan. A propósito NO incluye
+    stripe_price_id, modelos, historial, cupo de números ni coexistencia.
+    """
+
+    nombre: str
+    descripcion: str | None
+    precio_monthly: Decimal
+    max_vendedores: int | None
+    max_proveedores: int | None
+    max_leads_mensuales: int | None
+    creditos_incluidos_mensual: Decimal
+    agente_ia_activo: bool
+    gestion_vendedores_activo: bool
+    herramientas_activo: bool
+    crm_campo_activo: bool
+    calendario_activo: bool
+    destacado: bool
+
+
+class PlanesPublicosOut(BaseModel):
+    planes: list[PlanPublicoOut]
 
 
 class PaqueteCreditosOut(BaseModel):
@@ -2158,6 +2192,10 @@ class GerenciaUsuarioOut(BaseModel):
     tiene_cuenta_portal: bool
     ultimo_acceso: datetime | None
     es_yo: bool
+    # Es la persona de GERENCIA_PRINCIPAL_EMAIL (no se puede quitar).
+    es_principal: bool = False
+    # Lo que puede hacer quien consulta: alta y baja de miembros.
+    puede_administrar: bool = False
 
 
 # ------------------------------------------------------------
@@ -2281,6 +2319,8 @@ class PlanGerenciaOut(BaseModel):
     max_numeros_whatsapp: int | None = None
     # El plan permite vincular números en modo coexistencia (app móvil + API).
     coexistencia_activa: bool = False
+    # Insignia "Recomendado" en la landing (74_plan_destacado.sql).
+    destacado: bool = False
     # Lista de herramientas del agente por familia (plan_herramientas, RF-9).
     # Vacía = ninguna.
     herramientas_plan: list[str] = Field(default_factory=list)
@@ -2350,6 +2390,7 @@ class PlanCrearIn(BaseModel):
     # el router lo valida y responde 400 `cupo_no_valido`.
     max_numeros_whatsapp: Any = None
     coexistencia_activa: bool = False
+    destacado: bool = False
     # Lista de herramientas del agente por familia (RF-9). None = se siembra
     # desde los flags; [] = ninguna.
     herramientas_plan: list[str] | None = None
@@ -2409,6 +2450,7 @@ class PlanActualizarIn(BaseModel):
     max_numeros_whatsapp: Any = None
     # null = no tocar.
     coexistencia_activa: bool | None = None
+    destacado: bool | None = None
     # Lista de herramientas por familia (RF-9). null = no tocar; [] = ninguna.
     herramientas_plan: list[str] | None = None
 

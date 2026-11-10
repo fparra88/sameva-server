@@ -19,7 +19,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 
 from config import settings
-from deps import UsuarioActual, gerencia_plataforma_actual
+from deps import UsuarioActual, gerencia_plataforma_actual, gerencia_principal_actual
 from realtime import emit_conversacion_estado, emit_mensaje
 from schemas import (
     AdjuntoOut,
@@ -48,6 +48,7 @@ from services import conversaciones as conversaciones_svc
 from services import vista_gerencia as vista_svc
 from services.cancelacion_citas import Granularidad, validar_rango_reporte
 from services.gerencia import registrar_auditoria
+from services.gerencia_equipo import es_principal, puede_administrar_equipo
 from services.gerencia_salud import problemas_de_salud
 from session import fetch_all, fetch_value, transaccion
 
@@ -181,6 +182,8 @@ def _usuario_out(f, yo: UsuarioActual) -> GerenciaUsuarioOut:
         tiene_cuenta_portal=f["tiene_cuenta_portal"],
         ultimo_acceso=f["ultimo_acceso"],
         es_yo=f["email"].lower() == yo.email.lower(),
+        es_principal=es_principal(f["email"]),
+        puede_administrar=puede_administrar_equipo(yo.email),
     )
 
 
@@ -197,10 +200,11 @@ async def listar_usuarios(gerente: UsuarioActual = Depends(gerencia_plataforma_a
 )
 async def agregar_usuario(
     datos: GerenciaUsuarioIn,
-    gerente: UsuarioActual = Depends(gerencia_plataforma_actual),
+    gerente: UsuarioActual = Depends(gerencia_principal_actual),
 ):
     """
-    Da nivel gerencia a un correo. No crea cuenta de portal: la persona
+    Solo la persona principal (GERENCIA_PRINCIPAL_EMAIL; sin ella, cualquier
+    gerencia). Da nivel gerencia a un correo. No crea cuenta de portal: la persona
     entra con la suya (correo o Google). Si todavía no tiene, el alta queda
     esperando y se activa sola el día que se registre con ese correo —
     `tiene_cuenta_portal` lo deja a la vista.
@@ -241,10 +245,10 @@ async def agregar_usuario(
 @router.delete("/usuarios/{usuario_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def quitar_usuario(
     usuario_id: UUID,
-    gerente: UsuarioActual = Depends(gerencia_plataforma_actual),
+    gerente: UsuarioActual = Depends(gerencia_principal_actual),
 ):
     """
-    Quita el nivel gerencia. Surte efecto en la siguiente petición de esa
+    Solo la persona principal. Quita el nivel gerencia. Surte efecto en la siguiente petición de esa
     persona (deps.usuario_actual relee la tabla), no cuando expire su token.
 
     No se puede quitar a uno mismo. Además de evitar el "me saqué sin

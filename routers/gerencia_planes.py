@@ -58,7 +58,7 @@ _COLUMNAS = """
     agente_ia_activo, gestion_vendedores_activo,
     herramientas_activo, crm_campo_activo, calendario_activo, activo, orden,
     stripe_price_id, modelos_permitidos, historial_maximo,
-    max_numeros_whatsapp, coexistencia_activa,
+    max_numeros_whatsapp, coexistencia_activa, destacado,
     created_at AS creado_en, updated_at AS actualizado_en
 """
 
@@ -113,6 +113,14 @@ async def _leer_herramientas(conn, nombre: str) -> list[str]:
         "SELECT familia FROM plan_herramientas WHERE plan_nombre = $1 ORDER BY familia", nombre
     )
     return [f["familia"] for f in filas]
+
+
+async def _quitar_destacado_a_los_demas(conn, nombre: str) -> None:
+    """Solo un plan a la vez lleva la insignia "Recomendado" de la landing."""
+    await conn.execute(
+        "UPDATE planes SET destacado = false, updated_at = NOW() WHERE destacado AND nombre <> $1",
+        nombre,
+    )
 
 
 def _out(f, herramientas: list[str] | None = None) -> PlanGerenciaOut:
@@ -182,9 +190,9 @@ async def crear_plan(
                      herramientas_activo, crm_campo_activo, calendario_activo,
                      activo, orden, stripe_price_id, max_proveedores,
                      modelos_permitidos, historial_maximo, max_numeros_whatsapp,
-                     coexistencia_activa)
+                     coexistencia_activa, destacado)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                        $17, $18, $19, $20)
+                        $17, $18, $19, $20, $21)
                 """,
                 datos.nombre,
                 datos.descripcion,
@@ -206,12 +214,16 @@ async def crear_plan(
                 datos.historial_maximo,
                 cupo,
                 datos.coexistencia_activa,
+                datos.destacado,
             )
         except asyncpg.UniqueViolationError:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Ya existe un plan con ese nombre",
             )
+
+        if datos.destacado:
+            await _quitar_destacado_a_los_demas(conn, datos.nombre)
 
         for familia in lista:
             await conn.execute(
@@ -343,6 +355,9 @@ async def actualizar_plan(
                 if datos.coexistencia_activa is None
                 else datos.coexistencia_activa
             ),
+            "destacado": (
+                anterior["destacado"] if datos.destacado is None else datos.destacado
+            ),
             "activo": anterior["activo"] if datos.activo is None else datos.activo,
             "orden": anterior["orden"] if datos.orden is None else datos.orden,
             # None = no tocar; "" = borrarlo (ver PlanActualizarIn).
@@ -382,6 +397,7 @@ async def actualizar_plan(
                 historial_maximo = $18,
                 max_numeros_whatsapp = $19,
                 coexistencia_activa = $20,
+                destacado = $21,
                 updated_at = NOW()
             WHERE nombre = $1
             """,
@@ -405,7 +421,10 @@ async def actualizar_plan(
             nuevo["historial_maximo"],
             nuevo["max_numeros_whatsapp"],
             nuevo["coexistencia_activa"],
+            nuevo["destacado"],
         )
+        if nuevo["destacado"]:
+            await _quitar_destacado_a_los_demas(conn, nombre)
 
         if datos.herramientas_plan is not None and set(nueva_lista) != set(lista_anterior):
             await conn.execute("DELETE FROM plan_herramientas WHERE plan_nombre = $1", nombre)

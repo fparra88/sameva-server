@@ -254,6 +254,7 @@ async def listar(
         f"""
         SELECT
             c.id,
+            c.user_id,
             c.channel_type,
             c.status,
             c.started_at,
@@ -351,7 +352,7 @@ async def detalle(tenant_id: UUID, conversacion_id: UUID):
     cab = await fetch_one(
         f"""
         SELECT
-            c.id, c.channel_type, c.status, c.started_at,
+            c.id, c.user_id, c.channel_type, c.status, c.started_at,
             c.asignado_a,
             {_ASIGNADO_NOMBRE} AS asignado_nombre,
             pa.role AS asignado_rol,

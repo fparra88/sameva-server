@@ -222,6 +222,49 @@ async def test_apagar_un_plan_no_lo_borra(http_client, gerente, nombre_plan):
 
 
 @pytest.mark.asyncio
+async def test_solo_un_plan_queda_destacado(http_client, gerente, nombre_plan):
+    otro = f"{nombre_plan}-b"
+    try:
+        r1 = await _crear(http_client, gerente["headers"], nombre=nombre_plan, destacado=True)
+        assert r1.status_code == 201 and r1.json()["destacado"] is True
+
+        r2 = await _crear(http_client, gerente["headers"], nombre=otro)
+        assert r2.json()["destacado"] is False
+        r3 = await http_client.patch(
+            f"/api/gerencia/planes/{otro}", json={"destacado": True}, headers=gerente["headers"]
+        )
+        assert r3.status_code == 200 and r3.json()["destacado"] is True
+
+        listado = await http_client.get("/api/gerencia/planes", headers=gerente["headers"])
+        destacados = [p["nombre"] for p in listado.json() if p["destacado"]]
+        assert destacados == [otro]
+    finally:
+        await execute("DELETE FROM planes WHERE nombre = $1", otro)
+
+
+@pytest.mark.asyncio
+async def test_el_catalogo_del_portal_conserva_el_plan_pausado_que_ya_tienes(
+    http_client, gerente, nombre_plan, tenant_y_usuario
+):
+    await _crear(http_client, gerente["headers"], nombre=nombre_plan)
+    await execute(
+        "INSERT INTO tenant_subscriptions (tenant_id, plan, estado, precio_monthly) VALUES ($1, $2, 'activa', 199)",
+        tenant_y_usuario["tenant_id"],
+        nombre_plan,
+    )
+    await http_client.patch(
+        f"/api/gerencia/planes/{nombre_plan}", json={"activo": False}, headers=gerente["headers"]
+    )
+
+    r = await http_client.get(
+        "/api/pagos/catalogo", headers={"Authorization": f"Bearer {tenant_y_usuario['token']}"}
+    )
+
+    propio = {p["nombre"]: p for p in r.json()["planes"]}[nombre_plan]
+    assert propio["disponible"] is False
+
+
+@pytest.mark.asyncio
 async def test_un_patch_vacio_se_rechaza(http_client, gerente, nombre_plan):
     await _crear(http_client, gerente["headers"], nombre=nombre_plan)
 
