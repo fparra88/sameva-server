@@ -166,3 +166,17 @@ async def test_cambiar_el_principal_no_borra_al_anterior(db, monkeypatch):
         assert gerencia_equipo.es_principal(dos) and not gerencia_equipo.es_principal(uno)
     finally:
         await execute("DELETE FROM gerencia_users WHERE email = ANY($1::text[])", [uno, dos])
+
+
+@pytest.mark.asyncio
+async def test_si_la_base_va_atrasada_el_arranque_no_se_cae(monkeypatch):
+    import asyncpg
+
+    def sin_tabla():
+        raise asyncpg.UndefinedTableError('relation "gerencia_users" does not exist')
+
+    monkeypatch.setattr(settings, "GERENCIA_PRINCIPAL_EMAIL", "alguien@ejemplo.com")
+    monkeypatch.setattr(gerencia_equipo, "transaccion", sin_tabla)
+
+    assert await gerencia_equipo.sembrar_principal() is False
+

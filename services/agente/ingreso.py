@@ -355,7 +355,7 @@ async def _upsert_usuario(tenant_id: UUID, mensaje: MensajeNormalizado) -> UUID:
         f"""
         INSERT INTO users (tenant_id, {columna}, display_name)
         VALUES ($1, $2, NULLIF(NULLIF($3, ''), 'null'))
-        ON CONFLICT (tenant_id, {columna})
+        ON CONFLICT (tenant_id, {columna}) WHERE {columna} IS NOT NULL
         DO UPDATE SET display_name = COALESCE(
             NULLIF(NULLIF(EXCLUDED.display_name, ''), 'null'), users.display_name
         )

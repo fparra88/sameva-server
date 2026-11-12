@@ -19,6 +19,8 @@ Reglas:
 
 import logging
 
+import asyncpg
+
 from config import settings
 from session import transaccion
 
@@ -36,22 +38,35 @@ def puede_administrar_equipo(email: str) -> bool:
 
 
 async def sembrar_principal() -> bool:
-    """Crea al principal si falta. True si lo creó. Sin variable configurada no hace nada."""
+    """
+    Crea al principal si falta. True si lo creó. Sin variable configurada no hace nada.
+
+    Nunca tumba el arranque: si la base va atrasada de migraciones (p. ej. falta
+    la tabla `gerencia_users`) o no responde, queda en el log y la API sube igual.
+    Que no haya principal es un problema acotado; que no suba la API, no.
+    """
     email = settings.GERENCIA_PRINCIPAL_EMAIL
     if not email:
         return False
-    async with transaccion() as conn:
-        existe = await conn.fetchval(
-            "SELECT 1 FROM gerencia_users WHERE LOWER(email) = $1", email
+    try:
+        async with transaccion() as conn:
+            existe = await conn.fetchval(
+                "SELECT 1 FROM gerencia_users WHERE LOWER(email) = $1", email
+            )
+            if existe:
+                return False
+            # ON CONFLICT: con varios workers arrancando a la vez, solo uno inserta.
+            await conn.execute(
+                "INSERT INTO gerencia_users (email, full_name, cargo) VALUES ($1, $2, $3) ON CONFLICT (email) DO NOTHING",
+                email,
+                settings.GERENCIA_PRINCIPAL_NOMBRE,
+                settings.GERENCIA_PRINCIPAL_CARGO,
+            )
+    except (asyncpg.PostgresError, OSError):
+        log.exception(
+            "No se pudo crear al principal de gerencia (¿faltan migraciones? "
+            "corre `python aplicar_sql.py --revisar`). La API arranca sin él."
         )
-        if existe:
-            return False
-        # ON CONFLICT: con varios workers arrancando a la vez, solo uno inserta.
-        await conn.execute(
-            "INSERT INTO gerencia_users (email, full_name, cargo) VALUES ($1, $2, $3) ON CONFLICT (email) DO NOTHING",
-            email,
-            settings.GERENCIA_PRINCIPAL_NOMBRE,
-            settings.GERENCIA_PRINCIPAL_CARGO,
-        )
+        return False
     log.info("Principal de gerencia creado desde GERENCIA_PRINCIPAL_EMAIL")
     return True
