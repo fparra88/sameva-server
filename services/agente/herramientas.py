@@ -41,7 +41,7 @@ from uuid import UUID
 import httpx
 
 from config import settings
-from services import creditos, herramientas_plan
+from services import creditos, db_externa, herramientas_plan
 from session import conexion, fetch_one, fetch_value
 
 log = logging.getLogger("operativai.agente.herramientas")
@@ -106,7 +106,7 @@ def definicion(catalogo: str) -> dict[str, Any]:
 # lo demás —el calendario completo (incluidas sus consultas, que necesitan una
 # conversación real), los POST externos y cualquier tipo nuevo— se simula: lo
 # que no se conoce no se ejecuta.
-TIPOS_LECTURA_EN_PRUEBA = frozenset({"sql_lectura", "google_sheets", "google_docs"})
+TIPOS_LECTURA_EN_PRUEBA = frozenset({"sql_lectura", "google_sheets", "google_docs", "db_externa"})
 
 
 def se_ejecuta_en_prueba(tipo: str, config: dict[str, Any]) -> bool:
@@ -240,6 +240,9 @@ async def _ejecutar(
         return await _google_sheets(config)
     if tipo == "google_docs":
         return await _google_docs(config)
+    if tipo == "db_externa":
+        # Nunca levanta: los fallos de conexión no se detallan al modelo (ver services/db_externa.py).
+        return await db_externa.consultar(tenant_id, tool_key, config, parametros)
 
     log.error("Herramienta %s con tipo no soportado: %s", tool_key, tipo)
     return "Esta herramienta tiene un tipo no reconocido por el sistema."

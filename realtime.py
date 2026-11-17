@@ -462,6 +462,20 @@ async def emit_mensaje(tenant_id: UUID, conversation_id: UUID, mensaje: dict[str
     )
 
 
+async def avisar_mensaje_nuevo(tenant_id: UUID, conversation_id: UUID) -> None:
+    """
+    Avisa que la conversación tiene un mensaje nuevo (del cliente o de la IA) para que la
+    Bandeja se refresque sola. Solo lleva el id: la UI vuelve a pedir lista y detalle, así
+    que no hace falta serializar el mensaje aquí. NUNCA lanza: un fallo del tiempo real no
+    puede romper el guardado ni la respuesta al cliente. Llamar DESPUÉS de actualizar
+    `last_message_at`, para que la lista reordenada ya lo vea.
+    """
+    try:
+        await emit_mensaje(tenant_id, conversation_id, {})
+    except Exception:
+        logger.exception("No se pudo avisar en vivo del mensaje nuevo (conversación %s)", conversation_id)
+
+
 async def emit_conversacion_estado(
     tenant_id: UUID,
     conversation_id: UUID,

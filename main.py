@@ -40,6 +40,7 @@ from routers import (
     conversaciones_historial,
     cuenta,
     dispositivos,
+    embudo,
     equipo,
     acceso_soporte,
     avisos_cita_config,
@@ -134,6 +135,7 @@ app.include_router(vendedores.router_vendedores, prefix="/api")
 app.include_router(vendedores.router_tenants, prefix="/api")
 app.include_router(vendedores.router_pipeline, prefix="/api")
 app.include_router(pipeline_config.router, prefix="/api")
+app.include_router(embudo.router, prefix="/api")
 app.include_router(alertas.router, prefix="/api")
 # Tokens de push de la app móvil: cada alerta de broadcast_alerta sale
 # también como push (services/push.py) a los mismos destinatarios.

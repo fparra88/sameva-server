@@ -2,12 +2,13 @@
 Herramientas por tenant.
 """
 
+import logging
 import re
 import unicodedata
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
 
 from config import settings
@@ -22,8 +23,13 @@ from deps import (
 from session import conexion, execute, fetch_all, fetch_one
 from schemas import (
     ActualizarHerramientaIn,
+    ConectarDbExternaIn,
     ConectarGoogleDocIn,
     ConectarGoogleSheetIn,
+    DbConexionIn,
+    DbExternaInfoOut,
+    DbProbarIn,
+    EditarDbExternaIn,
     ConsumoPaginaOut,
     ConsumoResumenOut,
     HerramientaInfoOut,
@@ -32,10 +38,12 @@ from schemas import (
     HerramientasNumeroIn,
 )
 from services import consumo_creditos as consumo_svc
-from services import google_tools, herramientas_calendario
+from services import db_externa, google_tools, herramientas_calendario, limite_publico, secretos
 from services import herramientas_plan
 from services import numeros_whatsapp as numeros
 from services.numeros_bitacora import Autor
+
+log = logging.getLogger("operativai.herramientas")
 
 router = APIRouter(
     prefix="/herramientas",
@@ -126,9 +134,24 @@ async def listar(tenant_id: UUID = Depends(tenant_actual)):
             nombre_documento=(f["config"] or {}).get("nombre_documento"),
             url_original=(f["config"] or {}).get("url_original"),
             gestionada=herramientas_calendario.es_gestionada(f["tool_key"]),
+            **_extra_db(f["tool_type"], f["config"]),
         )
         for f in filas
     ]
+
+
+def _extra_db(tool_type: str, config: dict | None) -> dict:
+    """Datos NO secretos de una conexión db_externa para la lista (nunca la contraseña)."""
+    if tool_type != "db_externa":
+        return {}
+    c = config or {}
+    return {
+        "motor": c.get("motor"),
+        "host": c.get("host"),
+        "base": c.get("base"),
+        "estado": c.get("estado") or "ok",
+        "n_objetos": len(c.get("objetos") or []),
+    }
 
 
 def _slug(texto: str) -> str:
@@ -282,6 +305,8 @@ async def verificar(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Herramienta no encontrada")
 
     config = fila["config"] or {}
+    if fila["tool_type"] == "db_externa":
+        return await _verificar_db_externa(tenant_id, tool_key, config)
 
     try:
         if fila["tool_type"] == "google_sheets":
@@ -387,6 +412,7 @@ async def actualizar(
         nombre_documento=config.get("nombre_documento"),
         url_original=config.get("url_original"),
         gestionada=herramientas_calendario.es_gestionada(fila["tool_key"]),
+        **_extra_db(fila["tool_type"], config),
     )
 
 
@@ -411,6 +437,321 @@ async def eliminar(
         tenant_id,
         tool_key,
     )
+
+
+# ============================================================
+# Base de datos externa (tool_type db_externa) — MySQL / PostgreSQL
+# ============================================================
+TEXTO_VERSION_DB = "2026-11-16"
+
+
+def _err(estado: int, codigo: str, mensaje: str, **extra) -> HTTPException:
+    return HTTPException(status_code=estado, detail={"codigo": codigo, "mensaje": mensaje, **extra})
+
+
+async def _exigir_db_externa(tenant_id: UUID) -> None:
+    """503 sin clave de cifrado; 402 si el plan del negocio no incluye la familia."""
+    if not secretos.disponible():
+        raise _err(503, "db_externa_no_disponible", "Esta herramienta no está disponible por ahora.")
+    async with conexion() as conn:
+        familias = await herramientas_plan.familias_aplicables(conn, tenant_id)
+    if "db_externa" not in familias:
+        raise _err(
+            402,
+            "herramienta_no_incluida_en_plan",
+            "Conectar una base de datos no está incluido en tu plan. Mejora tu plan para usarla.",
+        )
+
+
+def _limitar_pruebas(tenant_id: UUID) -> None:
+    # Cada prueba abre una conexión hacia un host que escribe el cliente: se acota por negocio.
+    limite_publico.limitar_por_clave(
+        str(tenant_id), 10, 60, "db_externa_probar", "Demasiados intentos de conexión. Espera un minuto."
+    )
+
+
+def _destino(datos: DbConexionIn | DbProbarIn | EditarDbExternaIn, password: str) -> db_externa.Destino:
+    return db_externa.Destino(
+        motor=datos.motor,
+        host=datos.host.strip(),
+        puerto=datos.puerto or db_externa.PUERTO_POR_MOTOR[datos.motor],
+        base=datos.base.strip(),
+        usuario=datos.usuario.strip(),
+        password=password,
+        ssl_modo=datos.ssl_modo,
+    )
+
+
+async def _probar_o_error(destino: db_externa.Destino) -> dict:
+    try:
+        return await db_externa.probar(destino)
+    except db_externa.ErrorDb as e:
+        raise _err(400, e.codigo, e.mensaje)
+
+
+async def _usadas(conn, tenant_id: UUID) -> int:
+    return await conn.fetchval(
+        "SELECT count(*) FROM tenant_tools WHERE tenant_id = $1 AND tool_type = 'db_externa'", tenant_id
+    )
+
+
+@router.get("/db-externa/info", response_model=DbExternaInfoOut)
+async def db_externa_info(tenant_id: UUID = Depends(tenant_actual)):
+    """Lo que el asistente necesita antes de empezar (plan, cupo, IP para el firewall)."""
+    async with conexion() as conn:
+        familias = await herramientas_plan.familias_aplicables(conn, tenant_id)
+        usadas = await _usadas(conn, tenant_id)
+    return DbExternaInfoOut(
+        disponible=secretos.disponible(),
+        incluida_en_plan="db_externa" in familias,
+        ip_salida=settings.DB_EXTERNA_IP_SALIDA or None,
+        conexiones_usadas=usadas,
+        conexiones_max=settings.DB_EXTERNA_MAX_CONEXIONES,
+        motores=list(db_externa.MOTORES),
+        texto_version=TEXTO_VERSION_DB,
+    )
+
+
+@router.get("/db-externa/{tool_key}")
+async def db_externa_detalle(
+    tool_key: str,
+    tenant_id: UUID = Depends(tenant_actual),
+    _: UsuarioActual = Depends(gerencia_actual),
+):
+    """La configuración NO secreta de una conexión, para reabrir el asistente en modo edición."""
+    fila = await fetch_one(
+        """
+        SELECT display_name, description, config FROM tenant_tools
+         WHERE tenant_id = $1 AND tool_key = $2 AND tool_type = 'db_externa'
+        """,
+        tenant_id,
+        tool_key,
+    )
+    if fila is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Herramienta no encontrada")
+    c = fila["config"] or {}
+    return {
+        "display_name": fila["display_name"],
+        "description": fila["description"],
+        "motor": c.get("motor"),
+        "host": c.get("host"),
+        "puerto": c.get("puerto"),
+        "base": c.get("base"),
+        "usuario": c.get("usuario"),
+        "ssl_modo": c.get("ssl_modo", "require"),
+        "estado": c.get("estado") or "ok",
+        "ultimo_error": c.get("ultimo_error"),
+        "objetos": [
+            {"objeto": o["objeto"], "descripcion": o.get("descripcion", ""), "columnas": [x["nombre"] for x in o["columnas"]]}
+            for o in c.get("objetos") or []
+        ],
+    }
+
+
+@router.post("/db-externa/probar")
+async def db_externa_probar(
+    datos: DbProbarIn,
+    tenant_id: UUID = Depends(tenant_actual),
+    _: UsuarioActual = Depends(gerencia_actual),
+):
+    """
+    Prueba la conexión sin guardar nada y devuelve lo que el asistente muestra: las
+    tablas/vistas visibles (con columnas) y si el usuario puede escribir. Al editar,
+    sin `password` se usa la guardada de `tool_key` (del mismo negocio).
+    """
+    await _exigir_db_externa(tenant_id)
+    _limitar_pruebas(tenant_id)
+    password = datos.password
+    if password is None:
+        if not datos.tool_key:
+            raise _err(400, "falta_password", "Escribe la contraseña para probar la conexión.")
+        password = await secretos.leer(tenant_id, datos.tool_key)
+        if password is None:
+            raise _err(400, "falta_password", "Escribe la contraseña para probar la conexión.")
+    return await _probar_o_error(_destino(datos, password))
+
+
+def _config_db(datos, objetos: list[dict], permisos: dict) -> dict:
+    return {
+        "motor": datos.motor,
+        "host": datos.host.strip(),
+        "puerto": datos.puerto or db_externa.PUERTO_POR_MOTOR[datos.motor],
+        "base": datos.base.strip(),
+        "usuario": datos.usuario.strip(),
+        "ssl_modo": datos.ssl_modo,
+        "objetos": objetos,
+        "estado": "ok",
+        "permisos_escritura": bool(permisos["hay"] or not permisos["verificable"]),
+    }
+
+
+async def _validar_y_registrar(
+    request: Request,
+    conn,
+    usuario: UsuarioActual,
+    tenant_id: UUID,
+    tool_key: str,
+    datos,
+    resultado: dict,
+) -> list[dict]:
+    """Cruza la selección con la base real y exige/registra las aceptaciones. Corre en la transacción."""
+    if not datos.acepta_responsabilidad:
+        raise _err(
+            400,
+            "falta_aceptar_responsabilidad",
+            "Debes aceptar que eres responsable de los datos que el agente podrá consultar.",
+        )
+    try:
+        objetos = db_externa.armar_objetos_permitidos(
+            resultado["objetos"], [o.model_dump() for o in datos.objetos]
+        )
+    except db_externa.SeleccionInvalida as e:
+        raise _err(400, "seleccion_invalida", str(e))
+
+    permisos = resultado["permisos_escritura"]
+    en_riesgo = permisos["hay"] or not permisos["verificable"]
+    if en_riesgo and not datos.acepta_riesgo_escritura:
+        raise _err(
+            409,
+            "permisos_escritura",
+            "El usuario de esta base puede modificar datos. Usa uno de solo lectura, o confirma que asumes el riesgo.",
+            detalle=permisos["detalle"],
+        )
+
+    ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
+        request.client.host if request.client else None
+    )
+    agente = (request.headers.get("user-agent") or "")[:300]
+    registros = [("responsabilidad", {"motor": datos.motor, "host": datos.host.strip(), "base": datos.base.strip()})]
+    if en_riesgo:
+        registros.append(
+            ("permisos_escritura", {"permisos": permisos["detalle"], "verificable": permisos["verificable"]})
+        )
+    for tipo, detalle in registros:
+        await conn.execute(
+            """
+            INSERT INTO db_externa_aceptaciones
+                (tenant_id, tool_key, portal_user_id, email, tipo, texto_version, detalle, ip, user_agent)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+            """,
+            tenant_id, tool_key, usuario.id, usuario.email, tipo, TEXTO_VERSION_DB, detalle, ip, agente,
+        )
+    return objetos
+
+
+def _salida_db(fila) -> HerramientaOut:
+    return HerramientaOut(
+        tool_key=fila["tool_key"],
+        tool_type=fila["tool_type"],
+        display_name=fila["display_name"],
+        description=fila["description"],
+        is_enabled=fila["is_enabled"],
+        last_verified_at=fila["last_verified_at"],
+        **_extra_db(fila["tool_type"], fila["config"]),
+    )
+
+
+@router.post("/db-externa", response_model=HerramientaOut, status_code=201)
+async def db_externa_conectar(
+    datos: ConectarDbExternaIn,
+    request: Request,
+    tenant_id: UUID = Depends(tenant_actual),
+    usuario: UsuarioActual = Depends(gerencia_actual),
+):
+    await _exigir_db_externa(tenant_id)
+    _limitar_pruebas(tenant_id)
+    resultado = await _probar_o_error(_destino(datos, datos.password))
+    tool_key = await _tool_key_disponible(tenant_id, _slug(datos.display_name))
+
+    async with conexion() as conn:
+        async with conn.transaction():
+            # Serializa las altas del negocio: el cupo se comprueba y se inserta sin carreras.
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"db_externa:{tenant_id}")
+            if await _usadas(conn, tenant_id) >= settings.DB_EXTERNA_MAX_CONEXIONES:
+                raise _err(
+                    409,
+                    "limite_conexiones",
+                    f"Ya tienes {settings.DB_EXTERNA_MAX_CONEXIONES} bases conectadas. Elimina una para conectar otra.",
+                )
+            objetos = await _validar_y_registrar(request, conn, usuario, tenant_id, tool_key, datos, resultado)
+            config = _config_db(datos, objetos, resultado["permisos_escritura"])
+            fila = await conn.fetchrow(
+                """
+                INSERT INTO tenant_tools
+                    (tenant_id, tool_key, tool_type, display_name, description,
+                     parametros_schema, config, is_enabled, last_verified_at)
+                VALUES ($1, $2, 'db_externa', $3, $4, $5::jsonb, $6::jsonb, true, NOW())
+                RETURNING tool_key, tool_type, display_name, description, is_enabled, last_verified_at, config
+                """,
+                tenant_id, tool_key, datos.display_name, datos.description,
+                db_externa.parametros_schema(objetos), config,
+            )
+            await secretos.guardar(conn, tenant_id, tool_key, datos.password)
+    log.info("db_externa conectada: tenant=%s herramienta=%s motor=%s", tenant_id, tool_key, datos.motor)
+    return _salida_db(fila)
+
+
+@router.put("/db-externa/{tool_key}", response_model=HerramientaOut)
+async def db_externa_editar(
+    tool_key: str,
+    datos: EditarDbExternaIn,
+    request: Request,
+    tenant_id: UUID = Depends(tenant_actual),
+    usuario: UsuarioActual = Depends(gerencia_actual),
+):
+    """Cambia la conexión o las tablas visibles. Sin `password` se conserva la guardada."""
+    existe = await fetch_one(
+        "SELECT 1 FROM tenant_tools WHERE tenant_id = $1 AND tool_key = $2 AND tool_type = 'db_externa'",
+        tenant_id,
+        tool_key,
+    )
+    if existe is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Herramienta no encontrada")
+    await _exigir_db_externa(tenant_id)
+    _limitar_pruebas(tenant_id)
+    password = datos.password
+    if password is None:
+        password = await secretos.leer(tenant_id, tool_key)
+        if password is None:
+            raise _err(400, "falta_password", "Escribe la contraseña de nuevo para reconectar.")
+    resultado = await _probar_o_error(_destino(datos, password))
+
+    async with conexion() as conn:
+        async with conn.transaction():
+            objetos = await _validar_y_registrar(request, conn, usuario, tenant_id, tool_key, datos, resultado)
+            config = _config_db(datos, objetos, resultado["permisos_escritura"])
+            fila = await conn.fetchrow(
+                """
+                UPDATE tenant_tools
+                   SET config = $3::jsonb, parametros_schema = $4::jsonb,
+                       last_verified_at = NOW(), updated_at = NOW()
+                 WHERE tenant_id = $1 AND tool_key = $2
+                RETURNING tool_key, tool_type, display_name, description, is_enabled, last_verified_at, config
+                """,
+                tenant_id, tool_key, config, db_externa.parametros_schema(objetos),
+            )
+            if datos.password is not None:
+                await secretos.guardar(conn, tenant_id, tool_key, datos.password)
+    return _salida_db(fila)
+
+
+async def _verificar_db_externa(tenant_id: UUID, tool_key: str, config: dict) -> HerramientaOut:
+    """«Probar de nuevo»: reconecta con lo guardado y devuelve la herramienta a «ok» si responde."""
+    await _exigir_db_externa(tenant_id)
+    _limitar_pruebas(tenant_id)
+    password = await secretos.leer(tenant_id, tool_key)
+    if password is None:
+        raise _err(400, "falta_password", "Faltan las credenciales: edita la conexión y escribe la contraseña.")
+    await _probar_o_error(db_externa.destino_desde_config(config, password))
+    await db_externa.marcar_ok(tenant_id, tool_key)
+    fila = await fetch_one(
+        """
+        SELECT tool_key, tool_type, display_name, description, is_enabled, last_verified_at, config
+          FROM tenant_tools WHERE tenant_id = $1 AND tool_key = $2
+        """,
+        tenant_id, tool_key,
+    )
+    return _salida_db(fila)
 
 
 # ============================================================

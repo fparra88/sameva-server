@@ -2,7 +2,7 @@
 Perfil personal (routers/perfil.py): datos, completitud y foto.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -22,7 +22,8 @@ COMPLETO = {
 
 
 def _hace_anios(anios: int, dias: int = 0) -> str:
-    hoy = date.today()
+    # UTC, como el validador del servidor: con la fecha local el test falla de noche.
+    hoy = datetime.now(timezone.utc).date()
     return (hoy.replace(year=hoy.year - anios) + timedelta(days=dias)).isoformat()
 
 

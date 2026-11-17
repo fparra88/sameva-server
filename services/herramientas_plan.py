@@ -8,7 +8,7 @@ Instagram, Facebook y el widget otro (`social_herramientas`). Reglas:
   - Solo se activa una herramienta del negocio que esté habilitada y cuya
     FAMILIA incluya la lista del plan que rige al negocio (402
     `herramienta_no_incluida_en_plan`). Familias: calendario, sql_lectura, http,
-    google_sheets, google_docs (P5).
+    google_sheets, google_docs (P5) y db_externa (opcional: solo si el plan la lista).
   - Una herramienta nueva del negocio nace desactivada en todos los números
     (D27): aquí nada la activa por su cuenta.
   - Si el plan retira una familia, las herramientas quedan desactivadas, sin
@@ -53,6 +53,7 @@ _FAMILIA_POR_TIPO: dict[str, str] = {
     "http_post_json": "http",
     "google_sheets": "google_sheets",
     "google_docs": "google_docs",
+    "db_externa": "db_externa",
 }
 
 

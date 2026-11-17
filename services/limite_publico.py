@@ -55,3 +55,19 @@ def limitar_por_ip(request: Request, maximo: int, ventana_s: int, ambito: str) -
             headers={"Retry-After": str(espera)},
         )
     cola.append(ahora)
+
+
+def limitar_por_clave(clave: str, maximo: int, ventana_s: int, ambito: str, mensaje: str | None = None) -> None:
+    """Igual que `limitar_por_ip` pero por una clave propia (p. ej. el negocio). Misma ventana en memoria."""
+    ahora = time.monotonic()
+    cola = _golpes[f"{ambito}:{clave}"]
+    while cola and ahora - cola[0] > ventana_s:
+        cola.popleft()
+    if len(cola) >= maximo:
+        espera = max(1, int(ventana_s - (ahora - cola[0])) + 1)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=mensaje or "Demasiadas solicitudes. Intenta de nuevo en un momento.",
+            headers={"Retry-After": str(espera)},
+        )
+    cola.append(ahora)

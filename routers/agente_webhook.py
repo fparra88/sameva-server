@@ -291,3 +291,6 @@ async def _guardar_respuesta(contexto: ContextoMensaje, texto: str) -> None:
         "UPDATE conversations SET last_message_at = NOW() WHERE id = $1",
         contexto.conversation_id,
     )
+    from realtime import avisar_mensaje_nuevo
+
+    await avisar_mensaje_nuevo(contexto.tenant_id, contexto.conversation_id)

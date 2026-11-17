@@ -580,6 +580,12 @@ class HerramientaOut(BaseModel):
     # services/herramientas_calendario.py): se puede pausar o editar su
     # texto, no borrar ni "verificar" como un documento de Google.
     gestionada: bool = False
+    # Solo `db_externa`: nada secreto (la contraseña nunca sale de la API).
+    motor: str | None = None
+    host: str | None = None
+    base: str | None = None
+    estado: str | None = None  # "ok" | "requiere_atencion"
+    n_objetos: int | None = None
 
 
 class ConectarGoogleSheetIn(BaseModel):
@@ -597,6 +603,76 @@ class ConectarGoogleDocIn(BaseModel):
     url: str = Field(min_length=10)
     display_name: str = Field(min_length=2, max_length=255)
     description: str = Field(min_length=5, max_length=1000)
+
+
+class DbConexionIn(BaseModel):
+    """Datos para conectar una base externa. `password` solo viaja de ida."""
+
+    motor: Literal["postgresql", "mysql"]
+    host: str = Field(min_length=3, max_length=253)
+    puerto: int | None = Field(default=None, ge=1, le=65535)
+    base: str = Field(min_length=1, max_length=128)
+    usuario: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=256, repr=False)
+    ssl_modo: Literal["require", "verify"] = "require"
+
+
+class DbProbarIn(BaseModel):
+    """Prueba de conexión. Al editar, `tool_key` sin `password` usa la contraseña ya guardada."""
+
+    motor: Literal["postgresql", "mysql"]
+    host: str = Field(min_length=3, max_length=253)
+    puerto: int | None = Field(default=None, ge=1, le=65535)
+    base: str = Field(min_length=1, max_length=128)
+    usuario: str = Field(min_length=1, max_length=128)
+    password: str | None = Field(default=None, min_length=1, max_length=256, repr=False)
+    ssl_modo: Literal["require", "verify"] = "require"
+    tool_key: str | None = Field(default=None, max_length=100)
+
+
+class DbObjetoElegidoIn(BaseModel):
+    objeto: str = Field(min_length=1, max_length=200)
+    descripcion: str = Field(default="", max_length=300)
+    columnas: list[str] = Field(min_length=1, max_length=40)
+
+
+class ConectarDbExternaIn(DbConexionIn):
+    display_name: str = Field(min_length=2, max_length=255)
+    description: str = Field(
+        min_length=5,
+        max_length=1000,
+        description="Cuándo debe el agente consultar esta base (lo lee la IA para decidir).",
+    )
+    objetos: list[DbObjetoElegidoIn] = Field(min_length=1, max_length=20)
+    # Constancia: el negocio es responsable de los datos que expone al agente.
+    acepta_responsabilidad: bool = False
+    # Solo hace falta si el usuario de la base puede escribir: se registra.
+    acepta_riesgo_escritura: bool = False
+
+
+class EditarDbExternaIn(BaseModel):
+    """Reconfigura una conexión. Sin `password` se conserva la guardada."""
+
+    motor: Literal["postgresql", "mysql"]
+    host: str = Field(min_length=3, max_length=253)
+    puerto: int | None = Field(default=None, ge=1, le=65535)
+    base: str = Field(min_length=1, max_length=128)
+    usuario: str = Field(min_length=1, max_length=128)
+    password: str | None = Field(default=None, min_length=1, max_length=256, repr=False)
+    ssl_modo: Literal["require", "verify"] = "require"
+    objetos: list[DbObjetoElegidoIn] = Field(min_length=1, max_length=20)
+    acepta_responsabilidad: bool = False
+    acepta_riesgo_escritura: bool = False
+
+
+class DbExternaInfoOut(BaseModel):
+    disponible: bool  # hay clave de cifrado configurada
+    incluida_en_plan: bool
+    ip_salida: str | None
+    conexiones_usadas: int
+    conexiones_max: int
+    motores: list[str]
+    texto_version: str
 
 
 class ActualizarHerramientaIn(BaseModel):
@@ -1036,6 +1112,59 @@ class ConversionPipelineOut(BaseModel):
     hasta: datetime | None
     total_leads: int
     etapas: list[ConversionEtapaOut]
+
+
+# ---------- Tablero del embudo (routers/embudo.py) ----------
+class EmbudoLeadOut(PipelineOut):
+    """Un lead con lo que se llenó en el CRM más lo que se sabe por su chat."""
+
+    cliente_username: str | None = None
+    cliente_desde: datetime | None = None
+    # Alta en el embudo y desde cuándo está en la etapa actual (bitácora).
+    alta_en: datetime | None = None
+    etapa_desde: datetime | None = None
+    # Conversación más reciente del contacto. Todo None si se dio de alta a
+    # mano y nunca escribió.
+    conversation_id: UUID | None = None
+    canal: str | None = None
+    chat_estado: str | None = None
+    chat_asignado_a: UUID | None = None
+    chat_asignado_nombre: str | None = None
+    ultimo_mensaje_en: datetime | None = None
+    ultimo_mensaje: str | None = None
+    # 'user' = el cliente escribió al último y nadie le ha contestado.
+    ultimo_mensaje_rol: str | None = None
+    total_mensajes: int = 0
+    mensajes_cliente: int = 0
+
+
+class EmbudoEtapaResumenOut(BaseModel):
+    estado: str
+    total: int
+    monto: Decimal
+    sin_vendedor: int
+    seguimientos_vencidos: int
+
+
+class EmbudoCanalOut(BaseModel):
+    # 'sin_chat' = leads dados de alta a mano, sin conversación.
+    canal: str
+    total: int
+    ganados: int
+    monto_ganado: Decimal
+
+
+class EmbudoMotivoOut(BaseModel):
+    motivo: str
+    total: int
+
+
+class EmbudoOut(BaseModel):
+    leads: list[EmbudoLeadOut]
+    # Totales reales por etapa: `leads` viene recortado (ver el router).
+    etapas: list[EmbudoEtapaResumenOut]
+    por_canal: list[EmbudoCanalOut]
+    motivos_perdida: list[EmbudoMotivoOut]
 
 
 # ============================================================
@@ -2340,7 +2469,7 @@ def _validar_modelos_plan(v: list[str] | None) -> list[str] | None:
     return ordenar_modelos(v)
 
 
-_FAMILIAS_PLAN = ("calendario", "sql_lectura", "http", "google_sheets", "google_docs")
+_FAMILIAS_PLAN = ("calendario", "sql_lectura", "http", "google_sheets", "google_docs", "db_externa")
 
 
 def _validar_familias_plan(v: list[str] | None) -> list[str] | None:

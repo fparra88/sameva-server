@@ -167,6 +167,20 @@ class Settings:
         for d in os.getenv("AGENTE_DOMINIOS_PERMITIDOS", "").split(",")
         if d.strip()
     )
+    # ---- Herramienta «Base de datos externa» (tool_type db_externa) ----
+    # Clave Fernet (32 bytes en base64 url-safe) con la que se cifran las
+    # contraseñas de las bases de los clientes. Generar con:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # Vacía = la herramienta queda apagada (503). DB_SECRETOS_KEY_ANTERIOR sirve
+    # para rotar: se descifra con ambas y se escribe siempre con la nueva.
+    DB_SECRETOS_KEY: str = os.getenv("DB_SECRETOS_KEY", "").strip()
+    DB_SECRETOS_KEY_ANTERIOR: str = os.getenv("DB_SECRETOS_KEY_ANTERIOR", "").strip()
+    DB_EXTERNA_TIMEOUT_S: int = int(os.getenv("DB_EXTERNA_TIMEOUT_S", "5"))
+    DB_EXTERNA_MAX_FILAS: int = int(os.getenv("DB_EXTERNA_MAX_FILAS", "50"))
+    DB_EXTERNA_MAX_CONEXIONES: int = int(os.getenv("DB_EXTERNA_MAX_CONEXIONES", "3"))
+    # IP pública desde la que sale el servidor: el cliente la agrega a su firewall.
+    DB_EXTERNA_IP_SALIDA: str = os.getenv("DB_EXTERNA_IP_SALIDA", "").strip()
+
     # Cuánto se espera antes de contestar, para juntar los mensajes sueltos
     # de una ráfaga ("hola" / "una pregunta" / "sobre un corte") en una sola
     # respuesta. Mismo valor que tenía el nodo Wait de n8n.

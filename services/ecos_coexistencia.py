@@ -198,7 +198,8 @@ async def _guardar_eco(tenant_id: UUID, agente_canal_id: UUID, eco: EcoMensaje) 
     usuario = await fetch_one(
         """
         INSERT INTO users (tenant_id, whatsapp_id) VALUES ($1, $2)
-        ON CONFLICT (tenant_id, whatsapp_id) DO UPDATE SET whatsapp_id = EXCLUDED.whatsapp_id
+        ON CONFLICT (tenant_id, whatsapp_id) WHERE whatsapp_id IS NOT NULL
+        DO UPDATE SET whatsapp_id = EXCLUDED.whatsapp_id
         RETURNING id
         """,
         tenant_id,

@@ -531,7 +531,8 @@ async def test_catalogo_de_familias_para_el_panel(http_client, gerente, headers_
     r = await http_client.get("/api/gerencia/planes/familias-herramientas", headers=gerente["headers"])
     assert r.status_code == 200
     assert r.json() == {
-        "familias": ["calendario", "sql_lectura", "http", "google_sheets", "google_docs"]
+        # db_externa es opcional: se ofrece en el panel pero no entra en los planes por sí sola.
+        "familias": ["calendario", "sql_lectura", "http", "google_sheets", "google_docs", "db_externa"]
     }
 
     r = await http_client.get(
@@ -583,3 +584,16 @@ async def test_cambios_de_cupo_precio_y_herramientas_quedan_auditados(
     )
     assert herramientas["detalle"]["nombre"] == nombre_plan
     assert herramientas["detalle"]["nuevas"] == ["http"]
+
+
+@pytest.mark.asyncio
+async def test_db_externa_nace_desactivada_y_gerencia_puede_activarla(http_client, gerente, nombre_plan):
+    """Familia opcional: un plan nuevo no la trae; gerencia la marca a propósito (y eso enciende herramientas_activo)."""
+    r = await _crear(http_client, gerente["headers"], nombre=nombre_plan)
+    assert r.status_code == 201, r.text
+    assert "db_externa" not in r.json()["herramientas_plan"]
+    url = f"/api/gerencia/planes/{nombre_plan}"
+    r = await http_client.patch(url, json={"herramientas_plan": ["db_externa"]}, headers=gerente["headers"])
+    assert r.status_code == 200, r.text
+    assert r.json()["herramientas_plan"] == ["db_externa"]
+    assert r.json()["herramientas_activo"] is True

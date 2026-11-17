@@ -154,7 +154,8 @@ def test_RF22_56_es_la_siguiente_migracion_libre_y_no_hay_duplicadas() -> None:
     recientes = [int(p.name.split("_")[0]) for p in DIR_SQL.glob("[0-9][0-9]_*.sql") if int(p.name.split("_")[0]) >= 54]
     assert len(recientes) == len(set(recientes))
     assert set(recientes) == set(range(54, max(recientes) + 1))
-    assert max(anteriores) == 72
+    # 73+ son posteriores a esta spec (embudo, destacado, db_externa…): solo importa que no se repitan ni haya huecos.
+    assert max(anteriores) >= 72
 
 
 @pytest.mark.parametrize("numero", sorted(ARCHIVOS))

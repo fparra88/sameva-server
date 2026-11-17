@@ -64,7 +64,7 @@ _COLUMNAS = """
 
 # Familias del catálogo base de herramientas del agente (P5, sql/57).
 _FAMILIAS_BASE = ("calendario", "sql_lectura", "http", "google_sheets", "google_docs")
-_OTRAS_FAMILIAS = ("sql_lectura", "http", "google_sheets", "google_docs")
+_OTRAS_FAMILIAS = ("sql_lectura", "http", "google_sheets", "google_docs", "db_externa")
 
 
 def _cupo_no_valido() -> HTTPException:
@@ -163,7 +163,9 @@ async def modelos_agente():
 @router.get("/familias-herramientas")
 async def familias_herramientas():
     """Catálogo base de familias de herramientas del agente (P5), para el panel."""
-    return {"familias": list(_FAMILIAS_BASE)}
+    # db_externa es opcional: no entra en `_FAMILIAS_BASE` (que traduce los flags
+    # viejos a lista) para que ningún plan la reciba sin que gerencia la marque.
+    return {"familias": list(_FAMILIAS_BASE) + ["db_externa"]}
 
 
 @router.post("", response_model=PlanGerenciaOut, status_code=status.HTTP_201_CREATED)

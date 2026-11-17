@@ -420,3 +420,35 @@ async def test_token_invalido_rechazado(http_client, tenant_y_usuario):
         headers={"Authorization": "Bearer invalid.token.here"},
     )
     assert response.status_code == 401
+
+
+# ============================================================
+# Bandeja en vivo: el mensaje del cliente y la respuesta de la IA avisan por socket
+# ============================================================
+async def test_avisar_mensaje_nuevo_emite_mensaje_nuevo_con_el_id(monkeypatch, tenant_y_usuario):
+    import realtime
+    from uuid import uuid4
+
+    emitidos = []
+
+    async def emit(evento, datos, room=None, **_):
+        emitidos.append((evento, datos, room))
+
+    monkeypatch.setattr(realtime.sio, "emit", emit)
+    conv = uuid4()
+    await realtime.avisar_mensaje_nuevo(tenant_y_usuario["tenant_id"], conv)
+    assert len(emitidos) == 1
+    evento, datos, sala = emitidos[0]
+    assert evento == "mensaje_nuevo" and datos == {"conversation_id": str(conv)}
+    assert f"tenant_{tenant_y_usuario['tenant_id']}" in sala
+
+
+async def test_avisar_mensaje_nuevo_nunca_lanza(monkeypatch):
+    import realtime
+    from uuid import uuid4
+
+    async def roto(*a, **k):
+        raise RuntimeError("socket caído")
+
+    monkeypatch.setattr(realtime.sio, "emit", roto)
+    await realtime.avisar_mensaje_nuevo(uuid4(), uuid4())  # no debe propagar

@@ -110,6 +110,7 @@ async def procesar(peticion: PeticionVerificada) -> ResultadoIngreso:
                 "UPDATE conversations SET esperando_reapertura = false, last_message_at = NOW() WHERE id = $1",
                 conversacion_id,
             )
+            await _en_vivo(tenant_id, conversacion_id)
             return ResultadoIngreso(
                 motivo="Número desvinculado: mensaje guardado sin respuesta"
             )
@@ -124,6 +125,7 @@ async def procesar(peticion: PeticionVerificada) -> ResultadoIngreso:
                 "UPDATE conversations SET esperando_reapertura = false, last_message_at = NOW() WHERE id = $1",
                 conversacion["id"],
             )
+            await _en_vivo(tenant_id, conversacion["id"])
             return ResultadoIngreso(
                 motivo=f"El número no responde ({entrada.motivo})"
             )
@@ -186,6 +188,7 @@ async def procesar(peticion: PeticionVerificada) -> ResultadoIngreso:
         "UPDATE conversations SET esperando_reapertura = false, last_message_at = NOW() WHERE id = $1",
         conversacion["id"],
     )
+    await _en_vivo(tenant_id, conversacion["id"])
 
     # Adjunto de un DM de Instagram por NeuroAPI: se baja por su proxy y queda
     # asociado al mensaje para el portal. Si falla, el mensaje sigue con su
@@ -320,6 +323,7 @@ async def _tramitar_baja_o_alta(
         """,
         conversacion["id"],
     )
+    await _en_vivo(tenant_id, conversacion["id"])
 
     return ResultadoIngreso(
         respuesta_inmediata=acuse,
@@ -426,6 +430,13 @@ async def _conversacion(
     )
 
 
+async def _en_vivo(tenant_id: UUID, conversation_id: UUID) -> None:
+    """Refresca la Bandeja de quien la tenga abierta (nunca lanza; ver realtime.avisar_mensaje_nuevo)."""
+    from realtime import avisar_mensaje_nuevo
+
+    await avisar_mensaje_nuevo(tenant_id, conversation_id)
+
+
 async def _guardar_mensaje(
     tenant_id: UUID, conversation_id: UUID, mensaje: MensajeNormalizado
 ) -> dict[str, Any] | None:
@@ -500,6 +511,7 @@ async def _conversacion_transferida(contexto: ContextoMensaje) -> ResultadoIngre
         """,
         contexto.conversation_id,
     )
+    await _en_vivo(contexto.tenant_id, contexto.conversation_id)
     return ResultadoIngreso(
         respuesta_inmediata=ACUSE_TRANSFERENCIA,
         destino=contexto.destino,

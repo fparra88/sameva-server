@@ -81,6 +81,9 @@ TABLAS = [
     ("usage_events", "n8n"),
     ("plan_limit_events", "n8n"),
     ("widget_rate_limit", "n8n"),
+    # sql/75: herramienta db_externa.
+    ("tool_secretos", "portal"),
+    ("db_externa_aceptaciones", "portal"),
 ]
 
 FUNCIONES = [
