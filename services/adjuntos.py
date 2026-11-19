@@ -8,6 +8,7 @@ un PDF renombrado a .png, o un ZIP cualquiera renombrado a .docx, no pasan.
 """
 
 import io
+import json
 import os
 import re
 import zipfile
@@ -55,6 +56,11 @@ class InfoAdjunto:
 def tope_absoluto() -> int:
     """Lo máximo que vale la pena leer de una subida antes de validar."""
     return max(settings.WA_IMAGEN_MAX_BYTES, settings.WA_DOCUMENTO_MAX_BYTES)
+
+
+def tope_entrante() -> int:
+    """Lo máximo que se baja de un canal: incluye las notas de voz."""
+    return max(tope_absoluto(), settings.WA_AUDIO_MAX_BYTES)
 
 
 def limite_para(mime: str) -> int:
@@ -140,6 +146,75 @@ def texto_mensaje(info: InfoAdjunto, leyenda: str | None) -> str:
     return f"[Documento: {info.nombre}]"
 
 
+# ------------------------------------------------------------
+# Entrantes (lo que manda el cliente): además, notas de voz
+# ------------------------------------------------------------
+# El audio SOLO se acepta de entrada y nunca se guarda: se transcribe y se
+# descarta (services/agente/medios.py). Por eso no está en `TIPOS`, que es lo
+# que valida el composer del portal: ampliarlo dejaría enviar audio desde ahí.
+TIPOS_AUDIO: dict[str, tuple[str, ...]] = {
+    "audio/ogg": (".ogg", ".opus", ".oga"),
+    "audio/mpeg": (".mp3",),
+    "audio/mp4": (".m4a",),
+    "audio/wav": (".wav",),
+}
+
+
+def _es_mp3(contenido: bytes) -> bool:
+    if contenido.startswith(b"ID3"):
+        return True
+    if len(contenido) < 2 or contenido[0] != 0xFF or (contenido[1] & 0xE0) != 0xE0:
+        return False
+    # Capa 00 es reservada (y es la que usa el AAC en ADTS, que no es MP3) y
+    # versión 01 también.
+    return (contenido[1] & 0x06) != 0 and ((contenido[1] >> 3) & 0x03) != 1
+
+
+def mime_audio_por_firma(contenido: bytes) -> str | None:
+    if contenido.startswith(b"OggS"):
+        return "audio/ogg"
+    if contenido[4:8] == b"ftyp" and contenido[8:12] in (b"M4A ", b"M4B "):
+        return "audio/mp4"
+    if contenido.startswith(b"RIFF") and contenido[8:12] == b"WAVE":
+        return "audio/wav"
+    if _es_mp3(contenido):
+        return "audio/mpeg"
+    return None
+
+
+def validar_adjunto_entrante(contenido: bytes, base: str, nombre: str | None = None) -> InfoAdjunto:
+    """
+    Lo que mandó un cliente por el canal: JPG/PNG/PDF/DOCX como siempre, o
+    una nota de voz (`tipo_wa='audio'`).
+
+    El nombre que da el canal (el `filename` de un documento) se respeta si
+    su extensión coincide con lo detectado; si no, o si no hay, se arma
+    `base` + la extensión del tipo real. El tipo lo decide la firma, nunca el
+    nombre.
+      422 -> vacío
+      415 -> ningún tipo admitido
+      413 -> pesa más que el tope de su tipo
+    """
+    if not contenido:
+        raise AdjuntoInvalido(422, "El archivo está vacío.")
+
+    audio = mime_audio_por_firma(contenido)
+    if audio is not None:
+        if len(contenido) > settings.WA_AUDIO_MAX_BYTES:
+            raise AdjuntoInvalido(
+                413, f"El audio pesa más de {settings.WA_AUDIO_MAX_BYTES // (1024 * 1024)} MB."
+            )
+        return InfoAdjunto(mime=audio, tipo_wa="audio", nombre=f"{nombre_seguro(base)}{TIPOS_AUDIO[audio][0]}")
+
+    mime = _mime_por_firma(contenido)
+    if mime is None:
+        raise AdjuntoInvalido(415, "Tipo de archivo no admitido.")
+    limpio = nombre_seguro(nombre)
+    if not limpio or os.path.splitext(limpio)[1].lower() not in TIPOS[mime][1]:
+        limpio = f"{nombre_seguro(base)}{TIPOS[mime][1][0]}"
+    return validar_adjunto(contenido, limpio)
+
+
 def cabeceras_descarga(nombre: str, *, privado: bool) -> dict[str, str]:
     """Cabeceras de respuesta al servir un adjunto (nombre codificado RFC 5987)."""
     return {
@@ -202,8 +277,14 @@ def nombre_por_contenido(contenido: bytes, base: str) -> str | None:
 
 
 async def _descargar(url: str, cabeceras: dict[str, str]) -> bytes:
-    """GET sin seguir redirecciones, cortando al pasar el tope absoluto."""
-    tope = tope_absoluto()
+    """GET sin seguir redirecciones, cortando al pasar el tope de entrada."""
+    contenido, _ = await _descargar_con_tipo(url, cabeceras)
+    return contenido
+
+
+async def _descargar_con_tipo(url: str, cabeceras: dict[str, str]) -> tuple[bytes, str]:
+    """Como `_descargar`, devolviendo también el Content-Type de la respuesta."""
+    tope = tope_entrante()
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False) as cliente:
             async with cliente.stream("GET", url, headers=cabeceras) as r:
@@ -216,6 +297,79 @@ async def _descargar(url: str, cabeceras: dict[str, str]) -> bytes:
                     if total > tope:
                         raise AdjuntoInvalido(413, f"El archivo pesa más de {tope // (1024 * 1024)} MB.")
                     trozos.append(trozo)
+                tipo = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
     except httpx.HTTPError as e:
-        raise AdjuntoInvalido(502, f"No se pudo descargar el archivo: {e}") from e
-    return b"".join(trozos)
+        raise AdjuntoInvalido(502, f"No se pudo descargar el archivo: {type(e).__name__}") from e
+    return b"".join(trozos), tipo
+
+
+# ------------------------------------------------------------
+# WhatsApp: el webhook trae solo el id del media (formato de Meta)
+# ------------------------------------------------------------
+# Único host del que se baja un media de Graph (las URL firmadas que devuelve
+# `GET /{media_id}`). Llega en una respuesta de Meta, pero se valida igual.
+_HOSTS_MEDIA_META = ("lookaside.fbsbx.com",)
+
+
+def _id_media_valido(media_id: str) -> bool:
+    return bool(_MEDIA_ID_INSTAGRAM.match(media_id or "")) and media_id.strip(".") != ""
+
+
+async def descargar_media_whatsapp(media_id: str, cred: dict) -> bytes:
+    """
+    Baja un media de WhatsApp con las credenciales del canal del tenant
+    (`get_channel_credentials`). El token se usa solo en la cabecera.
+
+      - bsp_provider='neuroapi': `GET {NEUROAPI}{NEUROAPI_WA_MEDIA_PATH}` con la
+        x-api-key del tenant. Si NeuroAPI contesta un JSON con la URL ya
+        resuelta, esa URL tiene que ser HTTPS del host de NeuroAPI.
+      - Meta directo: `GET {graph}/{media_id}` da la URL firmada, que solo se
+        baja si es de lookaside.fbsbx.com, con el mismo token.
+    """
+    if not _id_media_valido(media_id):
+        raise AdjuntoInvalido(422, "El identificador del archivo no es válido.")
+    token = cred.get("access_token")
+    if not token:
+        raise AdjuntoInvalido(503, "El canal no tiene credenciales activas.")
+
+    if cred.get("bsp_provider") == "neuroapi":
+        plantilla = settings.NEUROAPI_WA_MEDIA_PATH
+        if not plantilla or "{media_id}" not in plantilla:
+            raise AdjuntoInvalido(503, "NEUROAPI_WA_MEDIA_PATH sin configurar.")
+        ruta = plantilla.replace("{media_id}", quote(media_id, safe=""))
+        url = f"{settings.NEUROAPI_API_BASE_URL.rstrip('/')}/{ruta.lstrip('/')}"
+        contenido, tipo = await _descargar_con_tipo(url, {"x-api-key": token})
+        if tipo == "application/json":
+            enlace = _url_en_json(contenido)
+            if enlace is None:
+                raise AdjuntoInvalido(502, "NeuroAPI no devolvió el archivo.")
+            return await descargar_media(enlace)
+        return contenido
+
+    cabeceras = {"Authorization": f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as cliente:
+            r = await cliente.get(f"{settings.graph_url}/{quote(media_id, safe='')}", headers=cabeceras)
+    except httpx.HTTPError as e:
+        raise AdjuntoInvalido(502, f"No se pudo consultar el archivo: {type(e).__name__}") from e
+    if r.status_code != 200:
+        raise AdjuntoInvalido(502, f"Meta no devolvió el archivo ({r.status_code}).")
+    enlace = _url_en_json(r.content)
+    partes = urlparse(enlace or "")
+    if partes.scheme != "https" or (partes.hostname or "").lower() not in _HOSTS_MEDIA_META:
+        raise AdjuntoInvalido(502, "La URL del archivo no es de un origen permitido.")
+    return await _descargar(enlace, cabeceras)
+
+
+def _url_en_json(cuerpo: bytes) -> str | None:
+    try:
+        datos = json.loads(cuerpo)
+    except ValueError:
+        return None
+    if not isinstance(datos, dict):
+        return None
+    for clave in ("url", "link"):
+        valor = datos.get(clave)
+        if isinstance(valor, str) and valor:
+            return valor
+    return None

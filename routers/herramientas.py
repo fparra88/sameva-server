@@ -8,7 +8,7 @@ import unicodedata
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 
 from config import settings
@@ -23,6 +23,9 @@ from deps import (
 from session import conexion, execute, fetch_all, fetch_one
 from schemas import (
     ActualizarHerramientaIn,
+    ArchivoEnvioOut,
+    ArchivosEnvioOut,
+    EditarArchivoEnvioIn,
     ConectarDbExternaIn,
     ConectarGoogleDocIn,
     ConectarGoogleSheetIn,
@@ -37,7 +40,9 @@ from schemas import (
     HerramientaNumeroOut,
     HerramientasNumeroIn,
 )
+from services import adjuntos, almacen_archivos, archivos_envio
 from services import consumo_creditos as consumo_svc
+from services import conversaciones as conversaciones_svc
 from services import db_externa, google_tools, herramientas_calendario, limite_publico, secretos
 from services import herramientas_plan
 from services import numeros_whatsapp as numeros
@@ -61,6 +66,63 @@ async def info(usuario: UsuarioActual = Depends(usuario_actual)):
     except RuntimeError as e:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
     return HerramientaInfoOut(correo_servicio=correo)
+
+
+# ============================================================
+# Archivos que el agente envía por WhatsApp (familia `archivos`, sql/78)
+# ============================================================
+# Van antes de las rutas con `/{tool_key}`. Ver: todo el equipo; subir, editar
+# y borrar: solo gerencia del negocio (owner/superadmin).
+@router.get("/archivos", response_model=ArchivosEnvioOut)
+async def archivos_listar(tenant_id: UUID = Depends(tenant_actual)):
+    return ArchivosEnvioOut(
+        disponible=almacen_archivos.disponible(),
+        incluida_en_plan=await archivos_envio.plan_incluye(tenant_id),
+        maximo=settings.ARCHIVOS_MAX_POR_NEGOCIO,
+        archivos=await archivos_envio.listar(tenant_id),
+    )
+
+
+@router.post("/archivos", response_model=ArchivoEnvioOut, status_code=status.HTTP_201_CREATED)
+async def archivos_subir(
+    archivo: UploadFile = File(...),
+    descripcion: str = Form(..., max_length=archivos_envio.MAX_DESCRIPCION * 2),
+    _: UsuarioActual = Depends(gerencia_actual),
+    tenant_id: UUID = Depends(tenant_actual),
+):
+    await archivos_envio.exigir_disponible(tenant_id)
+    contenido = await conversaciones_svc.leer_subida(archivo)
+    return await archivos_envio.crear(tenant_id, contenido, archivo.filename, descripcion)
+
+
+@router.patch("/archivos/{archivo_id}", response_model=ArchivoEnvioOut)
+async def archivos_editar(
+    archivo_id: UUID,
+    datos: EditarArchivoEnvioIn,
+    _: UsuarioActual = Depends(gerencia_actual),
+    tenant_id: UUID = Depends(tenant_actual),
+):
+    return await archivos_envio.actualizar(tenant_id, archivo_id, datos.descripcion)
+
+
+@router.delete("/archivos/{archivo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def archivos_borrar(
+    archivo_id: UUID,
+    _: UsuarioActual = Depends(gerencia_actual),
+    tenant_id: UUID = Depends(tenant_actual),
+):
+    await archivos_envio.eliminar(tenant_id, archivo_id)
+
+
+@router.get("/archivos/{archivo_id}/contenido")
+async def archivos_ver(archivo_id: UUID, tenant_id: UUID = Depends(tenant_actual)):
+    """El archivo tal cual, para previsualizarlo en el portal (autenticado)."""
+    mime, nombre, contenido = await archivos_envio.descargar(tenant_id, archivo_id)
+    return Response(
+        content=contenido,
+        media_type=mime,
+        headers=adjuntos.cabeceras_descarga(nombre, privado=True),
+    )
 
 
 async def _solo_owner(usuario: UsuarioActual = Depends(usuario_actual)) -> UsuarioActual:

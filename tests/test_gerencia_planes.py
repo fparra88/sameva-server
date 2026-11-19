@@ -531,8 +531,12 @@ async def test_catalogo_de_familias_para_el_panel(http_client, gerente, headers_
     r = await http_client.get("/api/gerencia/planes/familias-herramientas", headers=gerente["headers"])
     assert r.status_code == 200
     assert r.json() == {
-        # db_externa es opcional: se ofrece en el panel pero no entra en los planes por sí sola.
-        "familias": ["calendario", "sql_lectura", "http", "google_sheets", "google_docs", "db_externa"]
+        # db_externa y multimedia son opcionales: se ofrecen en el panel pero no
+        # entran en los planes por sí solas.
+        "familias": [
+            "calendario", "sql_lectura", "http", "google_sheets", "google_docs", "db_externa", "multimedia",
+            "archivos",
+        ]
     }
 
     r = await http_client.get(

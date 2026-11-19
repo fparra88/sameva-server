@@ -51,7 +51,12 @@ async def acceso_pagos(tenant_id: UUID) -> AccesoPagos:
     fila = await fetch_one(
         """
         SELECT
-            s.estado AS estado_suscripcion,
+            -- Una 'activa' con la fecha ya pasada cuenta como pausada aunque el
+            -- job (jobs/pagos_background.py) no haya corrido todavía: así una
+            -- prueba o un ciclo vencido se corta en el momento, no hasta una
+            -- hora después (mismo criterio que acceso_plan.py).
+            CASE WHEN s.estado = 'activa' AND s.fecha_renovacion < NOW()
+                 THEN 'pausada' ELSE s.estado END AS estado_suscripcion,
             c.creditos_disponibles,
             COALESCE(ep.estado, 'activo') AS estado_plataforma
         FROM tenants t

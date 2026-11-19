@@ -529,6 +529,28 @@ class HerramientaInfoOut(BaseModel):
     correo_servicio: str
 
 
+# ---- Archivos que el agente envía por WhatsApp (services/archivos_envio.py) ----
+class ArchivoEnvioOut(BaseModel):
+    id: UUID
+    nombre: str
+    descripcion: str
+    mime: str
+    tipo_wa: str
+    bytes: int
+    created_at: datetime
+
+
+class ArchivosEnvioOut(BaseModel):
+    disponible: bool  # hay bucket configurado
+    incluida_en_plan: bool
+    maximo: int
+    archivos: list[ArchivoEnvioOut]
+
+
+class EditarArchivoEnvioIn(BaseModel):
+    descripcion: str
+
+
 # ---- Auditoría de consumo de créditos (services/consumo_creditos.py) ----
 class ConsumoItemOut(BaseModel):
     id: UUID
@@ -750,6 +772,9 @@ class MensajeOut(BaseModel):
     # correo de quien la mandó. None para 'user'/'assistant'.
     enviado_por: str | None = None
     adjuntos: list[AdjuntoOut] = Field(default_factory=list)
+    # Nota de voz del cliente transcrita por el agente multimedia (sql/77). El
+    # audio no se guarda: esto es todo lo que queda de él.
+    transcripcion: str | None = None
 
 
 class ConversacionOcultaDetalleOut(ConversacionOcultaOut):
@@ -1758,6 +1783,8 @@ class SuscripcionOut(BaseModel):
     plan: NombrePlan | None
     estado_suscripcion: EstadoSuscripcion | None
     fecha_renovacion: datetime | None
+    # 'prueba' = prueba gratuita (sin tarjeta); 'pago' = plan contratado.
+    origen: OrigenSuscripcion | None = None
     precio_monthly: Decimal | None
     creditos_disponibles: Decimal
     creditos_gastados: Decimal
@@ -2469,7 +2496,9 @@ def _validar_modelos_plan(v: list[str] | None) -> list[str] | None:
     return ordenar_modelos(v)
 
 
-_FAMILIAS_PLAN = ("calendario", "sql_lectura", "http", "google_sheets", "google_docs", "db_externa")
+_FAMILIAS_PLAN = (
+    "calendario", "sql_lectura", "http", "google_sheets", "google_docs", "db_externa", "multimedia", "archivos",
+)
 
 
 def _validar_familias_plan(v: list[str] | None) -> list[str] | None:

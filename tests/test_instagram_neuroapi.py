@@ -556,13 +556,9 @@ async def test_la_media_se_baja_por_el_proxy_de_neuroapi_con_su_key(monkeypatch)
     assert adjuntos.nombre_por_contenido(contenido, "instagram-MEDIA-1") == "instagram-MEDIA-1.png"
 
 
-@pytest.mark.asyncio
-async def test_un_adjunto_que_no_se_puede_bajar_no_rompe_el_mensaje(monkeypatch):
-    async def _falla(media_id):
-        raise adjuntos.AdjuntoInvalido(502, "caído")
-
-    monkeypatch.setattr(adjuntos, "descargar_media_instagram", _falla)
-    assert await instagram_neuroapi.guardar_adjunto_entrante(uuid4(), uuid4(), "MEDIA-2") is False
+# Que un adjunto que no se puede bajar no rompe el mensaje lo prueba ahora
+# tests/test_agente_medios.py (services/agente/medios.py sustituye a
+# instagram_neuroapi.guardar_adjunto_entrante para todos los canales).
 
 
 # ============================================================

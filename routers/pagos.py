@@ -553,7 +553,11 @@ async def suscripcion(
     """Estado de cobros del negocio: plan vigente y saldo de créditos."""
     fila = await fetch_one(
         """
-        SELECT s.plan, s.estado AS estado_suscripcion, s.fecha_renovacion,
+        SELECT s.plan,
+               -- 'activa' con la fecha pasada ya es 'pausada' (el job puede tardar).
+               CASE WHEN s.estado = 'activa' AND s.fecha_renovacion < NOW()
+                    THEN 'pausada' ELSE s.estado END AS estado_suscripcion,
+               s.fecha_renovacion, s.origen,
                s.precio_monthly,
                -- Saldo gastable: cuota del plan vigente + comprados. El consumo
                -- descuenta primero de creditos_plan (services/creditos.py), así

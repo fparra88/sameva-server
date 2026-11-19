@@ -33,8 +33,9 @@ FAMILIAS_HERRAMIENTAS: tuple[str, ...] = (
 
 # Familias que solo existen si el plan las incluye de forma explícita: no entran en
 # el catálogo "completo" de una prueba sin plan, así que nacen apagadas (gerencia las
-# enciende por plan). Ver sql/75.
-FAMILIAS_OPCIONALES: tuple[str, ...] = ("db_externa",)
+# enciende por plan). Ver sql/75. `multimedia` (sql/77) no es una herramienta sino
+# una capacidad del agente: analizar imágenes, documentos y notas de voz.
+FAMILIAS_OPCIONALES: tuple[str, ...] = ("db_externa", "multimedia", "archivos")
 FAMILIAS_CATALOGO: tuple[str, ...] = FAMILIAS_HERRAMIENTAS + FAMILIAS_OPCIONALES
 
 # RF-2 paso 1: cinco altas ajenas rechazadas en una ventana deslizante de 24 h.

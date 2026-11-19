@@ -221,3 +221,46 @@ async def test_la_ventana_recorta_por_los_mas_recientes(conversacion):
 
     # Los tres últimos, en orden cronológico.
     assert [t["content"] for t in turnos] == ["mensaje 7", "mensaje 8", "mensaje 9"]
+
+
+# ============================================================
+# Notas de voz transcritas (sql/77): el historial ve el texto, no "[Audio]"
+# ============================================================
+async def test_una_nota_de_voz_transcrita_entra_con_su_texto(conversacion):
+    audio = await agregar(conversacion, "user", "[Audio]", 10)
+    await agregar(conversacion, "user", "[Audio]", 9)  # sin transcribir
+    await execute(
+        """
+        INSERT INTO message_transcripciones (message_id, tenant_id, texto, segundos, proveedor, modelo)
+        VALUES ($1, $2, 'quiero una cita el viernes', 4.2, 'groq', 'whisper-large-v3-turbo')
+        """,
+        audio,
+        conversacion["tenant_id"],
+    )
+    actual = await agregar(conversacion, "user", "¿y el precio?", 0)
+
+    turnos = await historial(contexto_de(conversacion, [actual]), ventana=30)
+
+    assert [t["content"] for t in turnos] == [
+        "[Nota de voz del cliente, transcrita] quiero una cita el viernes",
+        "[Audio]",
+    ]
+
+
+async def test_la_familia_multimedia_cabe_en_un_plan(db):
+    """El CHECK de plan_herramientas acepta la familia nueva (sql/77)."""
+    nombre = f"test-multimedia-{uuid4().hex[:8]}"
+    await execute(
+        "INSERT INTO planes (nombre, precio_monthly, activo) VALUES ($1, 9999, false)", nombre
+    )
+    try:
+        await execute(
+            "INSERT INTO plan_herramientas (plan_nombre, familia) VALUES ($1, 'multimedia')", nombre
+        )
+        assert await fetch_value(
+            "SELECT count(*) FROM plan_herramientas WHERE plan_nombre = $1 AND familia = 'multimedia'",
+            nombre,
+        ) == 1
+    finally:
+        await execute("DELETE FROM plan_herramientas WHERE plan_nombre = $1", nombre)
+        await execute("DELETE FROM planes WHERE nombre = $1", nombre)

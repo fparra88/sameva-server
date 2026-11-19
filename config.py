@@ -181,6 +181,54 @@ class Settings:
     # IP pública desde la que sale el servidor: el cliente la agrega a su firewall.
     DB_EXTERNA_IP_SALIDA: str = os.getenv("DB_EXTERNA_IP_SALIDA", "").strip()
 
+    # ---- Archivos que el agente envía (familia opcional `archivos`, sql/78) ----
+    # Bucket S3 privado. Sin bucket = la función queda apagada (503). En AWS se
+    # usa el rol IAM de la instancia: no hace falta poner llaves aquí.
+    ARCHIVOS_S3_BUCKET: str = os.getenv("ARCHIVOS_S3_BUCKET", "").strip()
+    ARCHIVOS_S3_REGION: str = os.getenv("ARCHIVOS_S3_REGION", "us-east-1").strip()
+    ARCHIVOS_MAX_POR_NEGOCIO: int = int(os.getenv("ARCHIVOS_MAX_POR_NEGOCIO", "5"))
+    # Vida del enlace que descargan Meta/NeuroAPI al enviar un archivo.
+    ARCHIVOS_ENLACE_MINUTOS: int = int(os.getenv("ARCHIVOS_ENLACE_MINUTOS", "30"))
+    # Tope de envíos de archivo del agente por respuesta.
+    ARCHIVOS_MAX_POR_TURNO: int = int(os.getenv("ARCHIVOS_MAX_POR_TURNO", "5"))
+
+    # ---- Agente multimedia (services/agente/multimedia.py, medios.py) ----
+    # Se enciende por plan (familia opcional `multimedia`, sql/77); estos son
+    # los topes por turno. Una imagen va en base64 (+33 %) y la API admite 5 MB
+    # por imagen y 32 MB por petición: de ahí los valores.
+    AGENTE_MAX_ADJUNTOS_TURNO: int = int(os.getenv("AGENTE_MAX_ADJUNTOS_TURNO", "5"))
+    AGENTE_IMAGEN_MAX_BYTES: int = int(
+        os.getenv("AGENTE_IMAGEN_MAX_BYTES", str(3_750_000))
+    )
+    AGENTE_MEDIA_MAX_BYTES_TURNO: int = int(
+        os.getenv("AGENTE_MEDIA_MAX_BYTES_TURNO", str(20 * 1024 * 1024))
+    )
+    # 100 es el tope de la API para modelos de 200K de contexto (Haiku 4.5).
+    AGENTE_PDF_MAX_PAGINAS: int = int(os.getenv("AGENTE_PDF_MAX_PAGINAS", "100"))
+    # Texto extraído de un DOCX que se le pasa al modelo, como máximo.
+    AGENTE_DOCX_MAX_CARACTERES: int = int(os.getenv("AGENTE_DOCX_MAX_CARACTERES", "60000"))
+    # Notas de voz: no se guarda el audio, solo su transcripción. Tope por
+    # tamaño (no hay decodificador para medir la duración antes de mandarlo).
+    WA_AUDIO_MAX_BYTES: int = int(os.getenv("WA_AUDIO_MAX_BYTES", str(16 * 1024 * 1024)))
+    # Transcripción. Solo "groq" por ahora; vacío o sin clave = no se
+    # transcribe y el agente ve "[Audio]" como siempre.
+    TRANSCRIPCION_PROVIDER: str = os.getenv("TRANSCRIPCION_PROVIDER", "groq").strip().lower()
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "").strip()
+    GROQ_API_BASE_URL: str = os.getenv(
+        "GROQ_API_BASE_URL", "https://api.groq.com/openai/v1"
+    ).rstrip("/")
+    TRANSCRIPCION_MODELO: str = os.getenv("TRANSCRIPCION_MODELO", "whisper-large-v3-turbo").strip()
+    # Pista de idioma para el reconocedor; vacío = que lo detecte solo.
+    TRANSCRIPCION_IDIOMA: str = os.getenv("TRANSCRIPCION_IDIOMA", "es").strip()
+    TRANSCRIPCION_TIMEOUT_S: float = float(os.getenv("TRANSCRIPCION_TIMEOUT_S", "30"))
+    # Precio del proveedor, para anotar el costo en tenant_token_usage.
+    TRANSCRIPCION_USD_POR_HORA: float = float(os.getenv("TRANSCRIPCION_USD_POR_HORA", "0.04"))
+    # Ruta de NeuroAPI que devuelve un media de WhatsApp por su id (el webhook
+    # lo manda igual que Meta: solo `id`). NeuroAPI no la documenta todavía:
+    # vacía = los adjuntos de WhatsApp por NeuroAPI no se descargan. Lleva
+    # `{media_id}`, p. ej. /neuroapi/whatsapp/media/{media_id}.
+    NEUROAPI_WA_MEDIA_PATH: str = os.getenv("NEUROAPI_WA_MEDIA_PATH", "").strip()
+
     # Cuánto se espera antes de contestar, para juntar los mensajes sueltos
     # de una ráfaga ("hola" / "una pregunta" / "sobre un corte") en una sola
     # respuesta. Mismo valor que tenía el nodo Wait de n8n.
@@ -273,7 +321,7 @@ class Settings:
     # la aceptación (portal_users.terminos_version). Es la fecha de "Última
     # actualización" de esas páginas: si se cambian los términos, se sube
     # acá y queda registrado quién aceptó cuál texto.
-    TERMINOS_VERSION: str = os.getenv("TERMINOS_VERSION", "2026-09-23")
+    TERMINOS_VERSION: str = os.getenv("TERMINOS_VERSION", "2026-11-18")
 
     # ---- Perfil del usuario (routers/perfil.py) ----
     # Foto: tope de peso y de lado. El portal redimensiona en el navegador
@@ -770,6 +818,16 @@ class Settings:
                     "/api/canales/entrada) y esos mensajes se rechazarán con 403. "
                     "Meta directo, Instagram, Facebook y el widget no dependen de "
                     "esto."
+                )
+            if self.TRANSCRIPCION_PROVIDER == "groq" and not self.GROQ_API_KEY:
+                log_agente.info(
+                    "GROQ_API_KEY sin configurar: las notas de voz no se transcriben "
+                    "y el agente las sigue viendo como [Audio]."
+                )
+            if not self.NEUROAPI_WA_MEDIA_PATH:
+                log_agente.info(
+                    "NEUROAPI_WA_MEDIA_PATH sin configurar: las imágenes, documentos "
+                    "y audios de WhatsApp por NeuroAPI no se descargan."
                 )
             if self.WIDGET_COMODIN_PERMITIDO:
                 log_agente.warning(

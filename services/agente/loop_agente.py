@@ -77,7 +77,8 @@ from uuid import UUID
 import anthropic
 
 from config import settings
-from services.agente import costos, escalar, herramientas, modelo as modelo_mod, prompt
+from services import archivos_envio
+from services.agente import costos, escalar, herramientas, modelo as modelo_mod, multimedia, prompt
 from services.agente.modelos import ContextoMensaje
 from session import execute
 
@@ -174,30 +175,40 @@ async def responder(
     )
     claves = {f["tool_key"] for f in filas}
     eventos = [] if simulacion else await prompt.eventos_de_contexto(contexto.conversation_id)
+    # Archivos que puede enviar (solo WhatsApp, familia `archivos`, catálogo no
+    # vacío). Vacío = la tool `enviar_archivo` ni se le ofrece al modelo.
+    archivos = await archivos_envio.catalogo_para_agente(contexto.tenant_id, contexto.canal)
 
     nombre_modelo = config["model"]
 
     # Marcar el bloque siempre: si no llega al mínimo cacheable del modelo
     # simplemente no se cachea, sin error y sin pagar escritura.
     system = prompt.bloques_system(
-        contexto, config, catalogo, claves, cacheable=True, eventos=eventos
+        contexto, config, catalogo, claves, cacheable=True, eventos=eventos,
+        archivos=archivos_envio.texto_catalogo(archivos),
     )
 
     if historial_previo is not None:
         mensajes: list[dict[str, Any]] = [dict(m) for m in historial_previo]
     else:
         mensajes = await prompt.historial(contexto, int(config["history_window"]))
-    mensajes.append({"role": "user", "content": contexto.contenido})
+    # Con adjuntos (y la familia `multimedia` en el plan) el turno es una lista
+    # de bloques: imágenes, PDF, DOCX como texto. Si no, el string de siempre.
+    turno = contexto.contenido if simulacion else await multimedia.armar_turno(contexto, nombre_modelo)
+    mensajes.append({"role": "user", "content": turno})
+    indice_turno = len(mensajes) - 1
 
     herramientas_disponibles = [
         herramientas.definicion(catalogo),
         escalar.definicion(),
     ]
+    if archivos:
+        herramientas_disponibles.append(archivos_envio.definicion(archivos))
 
     consumo = Consumo()
     respuesta = Respuesta(texto="", consumo=consumo, modelo=nombre_modelo)
 
-    try:
+    async def vueltas() -> None:
         await _vueltas(
             contexto=contexto,
             respuesta=respuesta,
@@ -209,6 +220,25 @@ async def responder(
             agente_canal_id=contexto.agente_canal_id,
             simulacion=simulacion,
         )
+
+    try:
+        try:
+            await vueltas()
+        except anthropic.BadRequestError:
+            # La API rechazó un adjunto (PDF corrupto, imagen ilegible). Un solo
+            # reintento con cada adjunto cambiado por una marca de texto, para
+            # que el cliente reciba respuesta y el agente le pida reenviarlo.
+            # Solo si falló antes de ejecutar herramientas: repetir vueltas ya
+            # hechas volvería a ejecutarlas.
+            if not multimedia.tiene_media(turno) or respuesta.herramientas:
+                raise
+            log.warning(
+                "La API rechazó los adjuntos de la conversación %s: reintento sin ellos",
+                contexto.conversation_id,
+            )
+            del mensajes[indice_turno + 1:]
+            mensajes[indice_turno] = {"role": "user", "content": multimedia.sin_media(turno)}
+            await vueltas()
     except anthropic.APIStatusError as e:
         log.error(
             "La API respondió %s para la conversación %s",
@@ -394,6 +424,10 @@ async def _ejecutar_llamadas(
                         "parametros": {"motivo": entrada.get("motivo"), "area": entrada.get("area")},
                     }
                 )
+            elif llamada.name == "enviar_archivo":
+                trazas.append(
+                    {"tool_key": "enviar_archivo", "parametros": {"archivo_id": entrada.get("archivo_id")}}
+                )
             else:
                 trazas.append(
                     {
@@ -431,6 +465,18 @@ async def _ejecutar_llamadas(
                 referencia_cobro=f"tool:{llamada.id}",
                 agente_canal_id=agente_canal_id,
                 cobrar=not simulacion,
+            )
+            transferida = False
+        elif llamada.name == "enviar_archivo":
+            # El modelo solo elige `archivo_id` (y una leyenda); tenant y
+            # conversación salen del contexto. El cobro es idempotente por
+            # el id de la llamada.
+            texto = await archivos_envio.enviar(
+                contexto=contexto,
+                archivo_id=str(entrada.get("archivo_id") or ""),
+                leyenda=entrada.get("leyenda"),
+                referencia_cobro=f"archivo:{llamada.id}",
+                simulacion=simulacion,
             )
             transferida = False
         else:

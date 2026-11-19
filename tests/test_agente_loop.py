@@ -657,3 +657,96 @@ async def test_el_breakpoint_se_mueve_y_no_se_acumula(monkeypatch, contexto):
         assert _marcas(mensajes) == [
             (len(mensajes) - 1, len(mensajes[-1]["content"]) - 1)
         ]
+
+
+# ============================================================
+# 9. Adjuntos (services/agente/multimedia.py)
+# ============================================================
+def _error_400():
+    import httpx
+
+    peticion = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    return anthropic.BadRequestError(
+        "adjunto inválido", response=httpx.Response(400, request=peticion), body=None
+    )
+
+
+class ClienteQueFallaPrimero(ClienteFalso):
+    """La primera petición da 400 (adjunto rechazado); las demás, lo pactado."""
+
+    def __init__(self, respuestas):
+        super().__init__(respuestas)
+        self._fallo = False
+
+    async def _create(self, **kwargs):
+        if not self._fallo:
+            self._fallo = True
+            self.instantaneas.append(deepcopy(kwargs))
+            raise _error_400()
+        return await super()._create(**kwargs)
+
+
+TURNO_CON_IMAGEN = [
+    {"type": "text", "text": "aviso"},
+    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"}},
+    {"type": "text", "text": "¿cuánto cuesta esto?"},
+]
+
+
+async def test_el_turno_con_adjuntos_viaja_como_bloques(monkeypatch, contexto):
+    from services.agente import multimedia
+
+    async def armar(ctx, modelo):
+        return deepcopy(TURNO_CON_IMAGEN)
+
+    monkeypatch.setattr(multimedia, "armar_turno", armar)
+    cliente = usar_cliente(monkeypatch, [respuesta_api([bloque_texto("Cuesta 200.")])])
+
+    r = await loop_agente.responder(contexto)
+
+    assert r.texto == "Cuesta 200."
+    enviado = cliente.instantaneas[0]["messages"][-1]
+    assert enviado["role"] == "user"
+    assert enviado["content"][1]["type"] == "image"
+
+
+async def test_si_la_api_rechaza_el_adjunto_se_reintenta_sin_el(monkeypatch, contexto):
+    from services.agente import multimedia
+
+    async def armar(ctx, modelo):
+        return deepcopy(TURNO_CON_IMAGEN)
+
+    monkeypatch.setattr(multimedia, "armar_turno", armar)
+    cliente = ClienteQueFallaPrimero([respuesta_api([bloque_texto("¿Me la reenvías?")])])
+    monkeypatch.setattr(loop_agente, "_cliente", lambda: cliente)
+
+    r = await loop_agente.responder(contexto)
+
+    assert r.texto == "¿Me la reenvías?" and r.fallo is False
+    assert multimedia.tiene_media(cliente.instantaneas[0]["messages"][-1]["content"])
+    reintento = cliente.instantaneas[1]["messages"]
+    assert not multimedia.tiene_media(reintento[-1]["content"])
+    assert len(reintento) == len(cliente.instantaneas[0]["messages"])
+
+
+async def test_un_400_sin_adjuntos_no_se_reintenta(monkeypatch, contexto):
+    cliente = ClienteQueFallaPrimero([respuesta_api([bloque_texto("no debía llegar")])])
+    monkeypatch.setattr(loop_agente, "_cliente", lambda: cliente)
+
+    r = await loop_agente.responder(contexto)
+
+    assert r.fallo is True and r.texto == loop_agente.RESPUESTA_VACIA
+    assert len(cliente.instantaneas) == 1
+
+
+async def test_el_modo_prueba_no_arma_adjuntos(monkeypatch, contexto):
+    from services.agente import multimedia
+
+    async def armar(ctx, modelo):  # pragma: no cover
+        raise AssertionError("el modo prueba no lee adjuntos")
+
+    monkeypatch.setattr(multimedia, "armar_turno", armar)
+    usar_cliente(monkeypatch, [respuesta_api([bloque_texto("ok")])])
+    contexto.con_adjuntos = True
+    r = await loop_agente.responder(contexto, simulacion=True, historial_previo=[])
+    assert r.texto == "ok"

@@ -84,6 +84,10 @@ TABLAS = [
     # sql/75: herramienta db_externa.
     ("tool_secretos", "portal"),
     ("db_externa_aceptaciones", "portal"),
+    # sql/77: transcripciones de notas de voz del agente multimedia.
+    ("message_transcripciones", "portal"),
+    # sql/78: catálogo de archivos que el agente envía por WhatsApp.
+    ("tenant_archivos", "portal"),
 ]
 
 FUNCIONES = [

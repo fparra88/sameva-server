@@ -26,7 +26,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 
 from config import settings
-from services import adjuntos, mensajeria, meta, whatsapp
+from services import adjuntos, almacen_archivos, mensajeria, meta, whatsapp
 from session import execute, fetch_all, fetch_one, transaccion
 
 # n8n arma el INSERT de `users` con expresiones de plantilla que, cuando el
@@ -386,9 +386,11 @@ async def detalle(tenant_id: UUID, conversacion_id: UUID):
                COALESCE(
                    pu.full_name, pu.email,
                    CASE WHEN m.desde_app_movil THEN 'App móvil de WhatsApp Business' END
-               ) AS enviado_por
+               ) AS enviado_por,
+               t.texto AS transcripcion
         FROM messages m
         LEFT JOIN portal_users pu ON pu.id = m.sender_portal_user_id
+        LEFT JOIN message_transcripciones t ON t.message_id = m.id
         WHERE m.conversation_id = $1
         ORDER BY m.created_at ASC
         """,
@@ -802,10 +804,14 @@ async def adjuntos_de_mensajes(mensaje_ids: list[UUID]) -> dict[UUID, list[dict]
 
 
 async def obtener_adjunto(tenant_id: UUID, conversacion_id: UUID, adjunto_id: UUID):
-    """Adjunto con contenido; None si no es de esa conversación y tenant."""
-    return await fetch_one(
+    """
+    Adjunto con contenido; None si no es de esa conversación y tenant.
+    Los que mandó el agente desde el catálogo de archivos viven en S3
+    (`storage_key`): se leen de ahí y el resultado trae `contenido` igual.
+    """
+    fila = await fetch_one(
         """
-        SELECT a.mime, a.nombre, a.contenido
+        SELECT a.mime, a.nombre, a.contenido, a.storage_key
         FROM message_attachments a
         JOIN messages m ON m.id = a.message_id
         WHERE a.id = $1 AND m.conversation_id = $2 AND a.tenant_id = $3
@@ -814,6 +820,16 @@ async def obtener_adjunto(tenant_id: UUID, conversacion_id: UUID, adjunto_id: UU
         conversacion_id,
         tenant_id,
     )
+    if fila is None or fila["contenido"] is not None:
+        return fila
+    try:
+        contenido = await almacen_archivos.leer(fila["storage_key"])
+    except almacen_archivos.ErrorAlmacen:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No se pudo leer el archivo. Intenta de nuevo.",
+        )
+    return {"mime": fila["mime"], "nombre": fila["nombre"], "contenido": contenido}
 
 
 async def tomar_conversacion(tenant_id: UUID, conversacion_id: UUID):

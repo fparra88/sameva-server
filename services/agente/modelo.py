@@ -40,15 +40,19 @@ class Capacidades:
     thinking_adaptativo: bool = False
     effort: bool = False
     temperature: bool = False
+    # Entradas que acepta además del texto (services/agente/multimedia.py).
+    # Desconocido = False: al modelo le llega solo la marca "[Imagen]".
+    vision: bool = False
+    pdf: bool = False
 
 
 # Lo que no esté acá se trata como desconocido (todo en False): la petición
 # mínima es la única que se puede dar por válida sin haberlo comprobado.
 _CAPACIDADES: dict[str, Capacidades] = {
-    "claude-opus-5": Capacidades(thinking_adaptativo=True, effort=True),
-    "claude-sonnet-5": Capacidades(thinking_adaptativo=True, effort=True),
-    "claude-haiku-4-5": Capacidades(temperature=True),
-    "claude-haiku-4-5-20251001": Capacidades(temperature=True),
+    "claude-opus-5": Capacidades(thinking_adaptativo=True, effort=True, vision=True, pdf=True),
+    "claude-sonnet-5": Capacidades(thinking_adaptativo=True, effort=True, vision=True, pdf=True),
+    "claude-haiku-4-5": Capacidades(temperature=True, vision=True, pdf=True),
+    "claude-haiku-4-5-20251001": Capacidades(temperature=True, vision=True, pdf=True),
 }
 
 DESCONOCIDO = Capacidades()

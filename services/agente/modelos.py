@@ -160,6 +160,20 @@ class ContextoMensaje:
     # Ids agrupados en esta pasada (la ráfaga). Incluye `db_message_id`.
     ids_agrupados: list[UUID] = field(default_factory=list)
 
+    # Algún mensaje de la ráfaga trae un adjunto guardado: el bucle arma el
+    # turno con services/agente/multimedia.py. False = el turno es el texto de
+    # siempre y no se toca la base.
+    con_adjuntos: bool = False
+
+    # Descarga/transcripción del adjunto de este mensaje (services/agente/
+    # medios.py), que corre mientras se espera la ráfaga. Se espera antes de
+    # agrupar, para que el texto transcrito ya esté en la base.
+    tarea_medios: Any = field(default=None, repr=False, compare=False)
+
+    # Archivos del catálogo que el agente ya mandó en este turno: tope por
+    # respuesta (services/archivos_envio.py).
+    archivos_enviados: int = 0
+
     @property
     def es_web(self) -> bool:
         return self.canal == "web"

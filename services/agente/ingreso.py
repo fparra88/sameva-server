@@ -34,8 +34,8 @@ from typing import Any, Optional
 from uuid import UUID
 
 from config import settings
-from services import conversaciones_ocultas, instagram_neuroapi, numeros_whatsapp, perfil_contacto
-from services.agente import bajas
+from services import conversaciones_ocultas, numeros_whatsapp, perfil_contacto
+from services.agente import bajas, medios, multimedia
 from services.agente import normalizar as normalizar_mod
 from services.agente import prompt
 from services.agente.modelos import (
@@ -190,13 +190,13 @@ async def procesar(peticion: PeticionVerificada) -> ResultadoIngreso:
     )
     await _en_vivo(tenant_id, conversacion["id"])
 
-    # Adjunto de un DM de Instagram por NeuroAPI: se baja por su proxy y queda
-    # asociado al mensaje para el portal. Si falla, el mensaje sigue con su
-    # texto ("[image]"); no frena la respuesta.
-    if mensaje.canal == "instagram" and mensaje.media_id and peticion.proveedor == "neuroapi":
-        await instagram_neuroapi.guardar_adjunto_entrante(
-            tenant_id, guardado["id"], mensaje.media_id
-        )
+    # Adjunto (WhatsApp o un DM de Instagram por NeuroAPI): se baja, se valida
+    # y se guarda —o, si es una nota de voz, se transcribe— mientras se espera
+    # la ráfaga. Si falla, el mensaje sigue con su texto ("[Imagen]"); no
+    # frena la respuesta. Ver services/agente/medios.py.
+    tarea_medios = medios.lanzar(
+        tenant_id, conversacion["id"], guardado["id"], mensaje, peticion.proveedor
+    )
 
     contexto = ContextoMensaje(
         tenant_id=tenant_id,
@@ -217,9 +217,14 @@ async def procesar(peticion: PeticionVerificada) -> ResultadoIngreso:
         conversation_status=conversacion["status"],
         conversation_metadata=conversacion["metadata"] or {},
         ids_agrupados=[guardado["id"]],
+        tarea_medios=tarea_medios,
     )
 
     if contexto.transferida:
+        # El agente calla, pero el adjunto se guarda igual: lo ve la persona
+        # que atiende, y la nota de voz le llega transcrita.
+        if tarea_medios is not None:
+            await tarea_medios
         return await _conversacion_transferida(contexto)
 
     # El widget contesta en la misma petición: hacer esperar al navegador
@@ -561,6 +566,11 @@ async def _esperar_rafaga(contexto: ContextoMensaje) -> bool:
     base para que no se vuelvan a arrastrar.
     """
     await asyncio.sleep(settings.AGENTE_ANTIFLOOD_SEGUNDOS)
+    # El adjunto de este mensaje se bajaba mientras tanto: hay que tenerlo
+    # (y la transcripción, si era audio) antes de agrupar. Los de mensajes
+    # anteriores de la ráfaga los esperó su propia pasada.
+    if contexto.tarea_medios is not None:
+        await contexto.tarea_medios
 
     hay_mas_nuevo = await fetch_one(
         """
@@ -575,18 +585,27 @@ async def _esperar_rafaga(contexto: ContextoMensaje) -> bool:
     if hay_mas_nuevo["hay_mas_nuevo"]:
         return False
 
+    # Una nota de voz entra con su transcripción en vez de "[Audio]", igual
+    # que en el historial (multimedia.TEXTO_MENSAJE_SQL).
     pendientes = await fetch_all(
-        """
-        SELECT id, content
-          FROM messages
-         WHERE conversation_id = $1 AND role = 'user' AND agrupado = false
-         ORDER BY created_at ASC
+        f"""
+        SELECT m.id,
+               {multimedia.TEXTO_MENSAJE_SQL} AS content,
+               EXISTS (
+                   SELECT 1 FROM message_attachments a
+                    WHERE a.message_id = m.id AND a.direccion = 'in'
+               ) AS con_adjunto
+          FROM messages m
+          {multimedia.JOIN_TRANSCRIPCION_SQL}
+         WHERE m.conversation_id = $1 AND m.role = 'user' AND m.agrupado = false
+         ORDER BY m.created_at ASC
         """,
         contexto.conversation_id,
     )
     if pendientes:
         contexto.contenido = "\n".join(f["content"] for f in pendientes)
         contexto.ids_agrupados = [f["id"] for f in pendientes]
+        contexto.con_adjuntos = any(f["con_adjunto"] for f in pendientes)
 
     await execute(
         "UPDATE messages SET agrupado = true WHERE id = ANY($1::uuid[])",

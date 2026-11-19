@@ -163,9 +163,11 @@ async def modelos_agente():
 @router.get("/familias-herramientas")
 async def familias_herramientas():
     """Catálogo base de familias de herramientas del agente (P5), para el panel."""
-    # db_externa es opcional: no entra en `_FAMILIAS_BASE` (que traduce los flags
-    # viejos a lista) para que ningún plan la reciba sin que gerencia la marque.
-    return {"familias": list(_FAMILIAS_BASE) + ["db_externa"]}
+    # db_externa y multimedia son opcionales: no entran en `_FAMILIAS_BASE` (que
+    # traduce los flags viejos a lista) para que ningún plan las reciba sin que
+    # gerencia las marque. multimedia tampoco cuenta para `herramientas_activo`
+    # (no es una herramienta): por eso no está en `_OTRAS_FAMILIAS`.
+    return {"familias": list(_FAMILIAS_BASE) + ["db_externa", "multimedia", "archivos"]}
 
 
 @router.post("", response_model=PlanGerenciaOut, status_code=status.HTTP_201_CREATED)

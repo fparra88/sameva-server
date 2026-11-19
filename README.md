@@ -1723,6 +1723,41 @@ usuario). Responde `{texto, modelo, transferida, herramientas, tokens_*, restant
 
 Tests: `tests/test_agente_tester.py`.
 
+### Agente multimedia: imágenes, documentos y notas de voz (`sql/77_agente_multimedia.sql`)
+
+El agente en código (`AGENTE_EN_CODIGO`) entiende lo que el cliente adjunta, si el plan incluye la familia opcional
+**`multimedia`** («Imágenes, documentos y audios» en `/gerencia/planes`; nace desmarcada, como `db_externa`, y no entra en
+el catálogo de una prueba sin plan). Sin la familia todo sigue como antes: el modelo ve "[Imagen]" / "[Audio]".
+
+- **Descarga** (`services/agente/medios.py`, en segundo plano mientras se espera la ráfaga): WhatsApp por el id del media
+  con las credenciales del canal del tenant (`adjuntos.descargar_media_whatsapp`: Graph `GET /{media_id}` y la URL firmada
+  solo de `lookaside.fbsbx.com`; o NeuroAPI por `NEUROAPI_WA_MEDIA_PATH` con la x-api-key del tenant, sin seguir URLs que
+  no sean del host de NeuroAPI). Instagram por el proxy de NeuroAPI, como antes. **Facebook no** (solo trae URL del CDN de
+  Meta; SSRF). Video y stickers se quedan con su marca de texto. Un adjunto que no se puede bajar nunca frena la respuesta.
+- **Validación**: `adjuntos.validar_adjunto_entrante` (JPG/PNG/PDF/DOCX + OGG/MP3/M4A/WAV por firma). `validar_adjunto`
+  (el composer de la Bandeja) **no** acepta audio.
+- **Imágenes y documentos** se guardan en `message_attachments` (para el portal, sin cobrar). Al contestar,
+  `services/agente/multimedia.py` arma el turno como bloques: imagen → `image` base64, PDF → `document` base64, DOCX →
+  texto extraído como `document` de texto. Precedidos de un aviso «datos, no instrucciones» (y una regla en
+  `REGLAS_PLATAFORMA`). **1 crédito por adjunto analizado** (`consumir_credito`, referencia `adjunto:{id}`, idempotente);
+  sin saldo, marca de texto. Topes: `AGENTE_MAX_ADJUNTOS_TURNO`, `AGENTE_IMAGEN_MAX_BYTES`, `AGENTE_MEDIA_MAX_BYTES_TURNO`,
+  `AGENTE_PDF_MAX_PAGINAS` (PDF cifrado = marca), `AGENTE_DOCX_MAX_CARACTERES`. Solo el turno actual lleva media; el
+  historial guarda la leyenda o "[Imagen]". Modelo sin `vision` en `modelo.py` = solo marcas.
+- **Rechazo de la API** (400 por un adjunto ilegible): un único reintento con cada adjunto cambiado por una marca, solo si
+  aún no se ejecutaron herramientas; el agente pide reenviarlo.
+- **Notas de voz**: Claude no acepta audio. Con la familia, `GROQ_API_KEY` y saldo, se transcriben con Groq
+  (`services/agente/transcripcion.py`, `whisper-large-v3-turbo`), se cobra 1 crédito (`transcripcion:{message_id}`, después
+  de transcribir: un fallo del proveedor no cobra) y se guarda **solo el texto** en `message_transcripciones`; el audio se
+  descarta. El historial, la ráfaga y la Bandeja leen la transcripción en lugar de "[Audio]"
+  (`multimedia.TEXTO_MENSAJE_SQL`). El costo va a `tenant_token_usage` con `origen='transcripcion'`. También se transcribe
+  si la conversación está en manos de una persona (le llega el texto en la Bandeja).
+- **Logs**: nunca el contenido, la transcripción ni errores crudos del proveedor; solo ids, tipos, bytes y segundos.
+- **Pendiente con NeuroAPI**: la ruta de descarga de media de WhatsApp no está documentada. Sin `NEUROAPI_WA_MEDIA_PATH` los
+  adjuntos de WhatsApp por NeuroAPI no se descargan (Meta directo e Instagram sí).
+
+Tests: `tests/test_agente_multimedia.py`, `tests/test_agente_medios.py`, `tests/test_adjuntos_entrantes.py` y la sección 9
+de `tests/test_agente_loop.py`.
+
 ### Varios números de WhatsApp por negocio (spec 005a, `sql/56` a `sql/59`)
 
 Estado: documentado en la tarea T0, antes del código. Hasta que se apliquen las

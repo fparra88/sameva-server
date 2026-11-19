@@ -1,5 +1,6 @@
 """
-Instagram Direct vía NeuroAPI Connect Sessions: alta de la cuenta y media entrante.
+Instagram Direct vía NeuroAPI Connect Sessions: alta de la cuenta. (La media
+entrante de los DM la baja services/agente/medios.py.)
 
 Mismo trámite que WhatsApp (services/neuroapi_connect.py abre la sesión y el
 webhook de routers/canales_neuroapi_webhook.py la cierra), con dos
@@ -23,7 +24,6 @@ igual que WhatsApp guarda NEUROAPI_API_KEY (sql/30): es lo que lee el envío
 from __future__ import annotations
 
 import logging
-import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal, Optional
@@ -32,11 +32,9 @@ from uuid import UUID
 import asyncpg
 
 from config import settings
-from services import adjuntos
 from services.numeros_bitacora import SISTEMA, ultimos_digitos
 from services.numeros_reglas import VENTANA_INTENTOS, evaluar_alta
 from services.numeros_whatsapp import lanzar_rechazo_alta, registrar_intento_ajeno
-from session import fetch_one
 
 log = logging.getLogger("operativai.canales.instagram_neuroapi")
 
@@ -180,51 +178,3 @@ async def vincular_desde_proveedor(
         tenant_id, ultimos_digitos(identificador),
     )
     return ResultadoAltaInstagram("vinculado", None, identificador, username)
-
-
-# ============================================================
-# Media entrante
-# ============================================================
-async def guardar_adjunto_entrante(tenant_id: UUID, message_id: UUID, media_id: str) -> bool:
-    """
-    Baja por el proxy de NeuroAPI el archivo de un DM y lo asocia al mensaje ya
-    guardado, como hace `/api/eventos/adjunto-entrante` con WhatsApp.
-
-    Nunca lanza: un adjunto que no se pudo bajar o que no es JPG/PNG/PDF/DOCX
-    deja el mensaje solo con su texto ("[image]"), que es lo que ya ve el
-    agente. Devuelve si quedó guardado.
-    """
-    try:
-        contenido = await adjuntos.descargar_media_instagram(media_id)
-        nombre = adjuntos.nombre_por_contenido(contenido, f"instagram-{media_id[-12:]}")
-        if nombre is None:
-            log.info("Adjunto de Instagram de un tipo no admitido (tenant %s): no se guarda", tenant_id)
-            return False
-        info = adjuntos.validar_adjunto(contenido, nombre)
-    except adjuntos.AdjuntoInvalido as e:
-        log.warning(
-            "No se pudo guardar el adjunto de Instagram (tenant %s): %s %s",
-            tenant_id, e.status_code, e.mensaje,
-        )
-        return False
-
-    try:
-        await fetch_one(
-            """
-            INSERT INTO message_attachments
-                (tenant_id, message_id, direccion, mime, nombre, bytes, contenido, token_publico)
-            VALUES ($1, $2, 'in', $3, $4, $5, $6, $7)
-            RETURNING id
-            """,
-            tenant_id,
-            message_id,
-            info.mime,
-            info.nombre,
-            len(contenido),
-            contenido,
-            secrets.token_urlsafe(32),
-        )
-    except Exception:
-        log.exception("No se pudo guardar el adjunto de Instagram (tenant %s)", tenant_id)
-        return False
-    return True
