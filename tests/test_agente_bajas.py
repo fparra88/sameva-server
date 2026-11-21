@@ -221,7 +221,7 @@ def ingreso_sin_base(monkeypatch, escrito, registradas):
     async def _upsert_usuario(tenant_id, mensaje):
         return USUARIO
 
-    async def _conversacion(tenant_id, user_id, canal):
+    async def _conversacion(tenant_id, user_id, canal, agente_canal_id=None):
         return {"id": CONVERSACION, "status": "active", "metadata": {}}
 
     async def _guardar_mensaje(tenant_id, conversation_id, mensaje):

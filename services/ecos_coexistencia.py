@@ -53,6 +53,13 @@ CAMPOS_ECO = ("smb_message_echoes", "message_echoes")
 # cubre reintentos y colas sin confundir dos mensajes iguales muy separados.
 VENTANA_MISMO_CONTENIDO_MIN = 5
 
+# `envio.partir` solo parte textos de más de 4000 caracteres y corta en la
+# segunda mitad de cada trozo, así que un trozo propio nunca baja de ~2000. Por
+# debajo de esto un eco solo se reconoce como propio si coincide entero.
+MIN_TROZO_PROPIO = 1000
+# Tope de WhatsApp en envio.LIMITES: un texto más largo salió en varios trozos.
+LIMITE_SIN_PARTIR = 4000
+
 _TEXTO_POR_TIPO = {
     "image": "[Imagen]",
     "video": "[Video]",
@@ -226,9 +233,16 @@ async def _guardar_eco(tenant_id: UUID, agente_canal_id: UUID, eco: EcoMensaje) 
                 """
                 SELECT id FROM messages
                  WHERE conversation_id = $1
-                   AND channel_msg_id IS NULL
                    AND role IN ('assistant', 'human')
-                   AND content = $2
+                   AND ((channel_msg_id IS NULL AND content = $2)
+                        -- Un texto largo sale partido (envio.partir) y cada
+                        -- trozo trae su eco (el primero ya anotó su wamid en
+                        -- la fila). Solo trozos largos: un "ok" del móvil no
+                        -- puede pasar por parte de una respuesta.
+                        OR (length(content) > $5 AND content <> $2
+                            AND ((length($2) >= $4 AND strpos(content, $2) > 0)
+                                 -- El último trozo es lo que sobra: puede ser corto.
+                                 OR right(rtrim(content), length($2)) = $2)))
                    AND created_at > NOW() - make_interval(mins => $3)
                  ORDER BY created_at DESC
                  LIMIT 1
@@ -237,10 +251,16 @@ async def _guardar_eco(tenant_id: UUID, agente_canal_id: UUID, eco: EcoMensaje) 
                 conversation_id,
                 eco.contenido,
                 VENTANA_MISMO_CONTENIDO_MIN,
+                MIN_TROZO_PROPIO,
+                LIMITE_SIN_PARTIR,
             )
             if propio is not None:
+                # Un mensaje partido tiene varios ecos y una sola fila: el
+                # primero anota su wamid; los demás solo se reconocen.
                 await conn.execute(
-                    "UPDATE messages SET channel_msg_id = $2 WHERE id = $1", propio, eco.wamid
+                    "UPDATE messages SET channel_msg_id = $2 WHERE id = $1 AND channel_msg_id IS NULL",
+                    propio,
+                    eco.wamid,
                 )
                 return "ya_registrado"
 

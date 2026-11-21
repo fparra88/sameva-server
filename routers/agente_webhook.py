@@ -250,6 +250,17 @@ async def _resolver_respuesta(resultado: ResultadoIngreso) -> str | None:
     if respuesta.transferida:
         return None
 
+    # Mientras el modelo pensaba, una persona pudo contestar desde la app
+    # móvil (eco de coexistencia) o tomar la conversación en el portal: si la
+    # respuesta saliera igual, cliente recibiría a los dos. El widget no tiene
+    # ese problema (contesta en la misma petición, nadie más escribe ahí).
+    if not contexto.es_web and not await ingreso.sigue_en_manos_de_la_ia(contexto.conversation_id):
+        log.info(
+            "Respuesta descartada: la conversación %s pasó a una persona durante la generación",
+            contexto.conversation_id,
+        )
+        return None
+
     await _guardar_respuesta(contexto, respuesta.texto)
     await _entregar(contexto.destino, respuesta.texto)
     return respuesta.texto

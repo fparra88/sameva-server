@@ -117,6 +117,11 @@ async def _mockea_persistencia(monkeypatch):
     monkeypatch.setattr(ingreso, "_guardar_mensaje", _guardar_mensaje)
     monkeypatch.setattr(ingreso, "execute", execute)
     monkeypatch.setattr(ingreso, "_esperar_rafaga", _esperar_rafaga)
+
+    async def _sigue_en_manos_de_la_ia(conversation_id):
+        return True
+
+    monkeypatch.setattr(ingreso, "sigue_en_manos_de_la_ia", _sigue_en_manos_de_la_ia)
     monkeypatch.setattr(
         conversaciones_ocultas, "conversacion_para_mensaje_oculto", _conversacion_oculto_falso
     )

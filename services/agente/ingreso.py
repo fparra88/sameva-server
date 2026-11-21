@@ -138,7 +138,7 @@ async def procesar(peticion: PeticionVerificada) -> ResultadoIngreso:
 
     # Antes de mirar el plan: una baja se apunta siempre. Un negocio con el
     # agente apagado sigue teniendo que dejar de escribirle a quien lo pidió.
-    tramitado = await _tramitar_baja_o_alta(tenant_id, user_id, mensaje)
+    tramitado = await _tramitar_baja_o_alta(tenant_id, user_id, mensaje, agente_canal_id)
     if tramitado is not None:
         return tramitado
 
@@ -174,7 +174,10 @@ async def procesar(peticion: PeticionVerificada) -> ResultadoIngreso:
             motivo="Agente no disponible para este tenant",
         )
 
-    conversacion = await _conversacion(tenant_id, user_id, mensaje.canal)
+    # Con el número: los ecos de coexistencia (ecos_coexistencia) buscan la
+    # conversación con él, y sin él cliente y eco acababan en dos hilos —en
+    # uno la persona tomaba el control y en el otro la IA seguía contestando.
+    conversacion = await _conversacion(tenant_id, user_id, mensaje.canal, agente_canal_id)
     await _completar_nombre(tenant_id, user_id, mensaje)
     guardado = await _guardar_mensaje(tenant_id, conversacion["id"], mensaje)
     if guardado is None:
@@ -232,8 +235,19 @@ async def procesar(peticion: PeticionVerificada) -> ResultadoIngreso:
     if not contexto.es_web:
         if not await _esperar_rafaga(contexto):
             return ResultadoIngreso(motivo="Llegó un mensaje más nuevo; lo atiende esa pasada")
+        # Durante la espera una persona pudo contestar desde el móvil
+        # (coexistencia) o tomarla en el portal: el modelo ya no debe correr.
+        if not await sigue_en_manos_de_la_ia(contexto.conversation_id):
+            return ResultadoIngreso(motivo="La tomó una persona durante la espera; el agente calla")
 
     return ResultadoIngreso(contexto=contexto)
+
+
+async def sigue_en_manos_de_la_ia(conversation_id: UUID) -> bool:
+    """La conversación sigue 'active' (nadie la tomó ni la transfirió)."""
+    return (
+        await fetch_value("SELECT status FROM conversations WHERE id = $1", conversation_id)
+    ) == "active"
 
 
 # ============================================================
@@ -268,7 +282,10 @@ async def _resolver_tenant(
 # Baja y alta (hallazgo 1)
 # ============================================================
 async def _tramitar_baja_o_alta(
-    tenant_id: UUID, user_id: UUID, mensaje: MensajeNormalizado
+    tenant_id: UUID,
+    user_id: UUID,
+    mensaje: MensajeNormalizado,
+    agente_canal_id: Optional[UUID] = None,
 ) -> ResultadoIngreso | None:
     """
     Atiende "BAJA" y "ALTA". None si el mensaje no era ninguna de las dos y
@@ -300,7 +317,7 @@ async def _tramitar_baja_o_alta(
         )
 
     acuse = bajas.ACUSE_BAJA if palabra_baja else bajas.ACUSE_ALTA
-    conversacion = await _conversacion(tenant_id, user_id, mensaje.canal)
+    conversacion = await _conversacion(tenant_id, user_id, mensaje.canal, agente_canal_id)
     guardado = await _guardar_mensaje(tenant_id, conversacion["id"], mensaje)
     if guardado is None:
         # Reintento del proveedor: la baja ya estaba apuntada (es idempotente)
@@ -405,34 +422,62 @@ async def _conversacion(
 
     `agente_canal_id` es parte de la clave: dos números del mismo negocio y
     mismo cliente son conversaciones distintas (spec 005a, RF-13).
+
+    Una conversación de WhatsApp viva SIN número (anterior a la spec 005a, o
+    abierta cuando la entrada no pasaba el número) se adopta: se le pone el
+    número y se sigue en ella. Abrir otra partía el hilo en dos y, en
+    coexistencia, el eco del móvil apagaba la IA en una mientras la otra
+    seguía contestando (y gastando tokens).
+
+    Lo que se hace bajo un candado por cliente y canal: un eco y un mensaje
+    del cliente que llegan a la vez no deben abrir dos conversaciones.
     """
-    return await fetch_one(
-        """
-        WITH existente AS (
-            SELECT id, status, metadata
-              FROM conversations
-             WHERE tenant_id = $1 AND user_id = $2 AND channel_type = $3
-               AND agente_canal_id IS NOT DISTINCT FROM $4
-               AND status IN ('active', 'transferred')
-             ORDER BY last_message_at DESC
-             LIMIT 1
-        ),
-        nueva AS (
-            INSERT INTO conversations (tenant_id, user_id, channel_type, status, agente_canal_id)
-            SELECT $1, $2, $3, 'active', $4
-             WHERE NOT EXISTS (SELECT 1 FROM existente)
-            RETURNING id, status, metadata
-        )
-        SELECT id, status, metadata FROM existente
-        UNION ALL
-        SELECT id, status, metadata FROM nueva
-        LIMIT 1
-        """,
-        tenant_id,
-        user_id,
-        canal,
-        agente_canal_id,
-    )
+    async with conexion() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                f"conversacion:{tenant_id}:{user_id}:{canal}",
+            )
+            existente = await conn.fetchrow(
+                """
+                SELECT id, status, metadata
+                  FROM conversations
+                 WHERE tenant_id = $1 AND user_id = $2 AND channel_type = $3
+                   AND (agente_canal_id IS NOT DISTINCT FROM $4
+                        OR ($3 = 'whatsapp' AND $4::uuid IS NOT NULL
+                            AND agente_canal_id IS NULL))
+                   AND status IN ('active', 'transferred')
+                 -- Primero la que ya es de este número; la heredada sin número, después.
+                 ORDER BY (agente_canal_id IS NULL), last_message_at DESC
+                 LIMIT 1
+                """,
+                tenant_id,
+                user_id,
+                canal,
+                agente_canal_id,
+            )
+            if existente is not None:
+                if agente_canal_id is not None:
+                    await conn.execute(
+                        "UPDATE conversations SET agente_canal_id = $2 "
+                        "WHERE id = $1 AND agente_canal_id IS NULL",
+                        existente["id"],
+                        agente_canal_id,
+                    )
+                return dict(existente)
+
+            fila = await conn.fetchrow(
+                """
+                INSERT INTO conversations (tenant_id, user_id, channel_type, status, agente_canal_id)
+                VALUES ($1, $2, $3, 'active', $4)
+                RETURNING id, status, metadata
+                """,
+                tenant_id,
+                user_id,
+                canal,
+                agente_canal_id,
+            )
+            return dict(fila)
 
 
 async def _en_vivo(tenant_id: UUID, conversation_id: UUID) -> None:

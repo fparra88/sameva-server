@@ -492,3 +492,137 @@ async def test_un_mensaje_de_cliente_sigue_reenviandose_al_agente(
 
     assert len(sin_reenvio) == 1
     assert await _mensajes(tid) == []  # lo guarda el agente, no la sincronización de ecos
+
+
+# ============================================================
+# Regresión: cliente y eco en la MISMA conversación (bug de producción: la
+# entrada abría la conversación sin número y el eco con número → dos hilos,
+# el eco apagaba la IA en uno y la IA seguía contestando en el otro).
+# ============================================================
+async def _cliente(tenant_id, wa_id: str = "5215511112222"):
+    return await fetch_value(
+        "INSERT INTO users (tenant_id, whatsapp_id, display_name) VALUES ($1, $2, 'Ceci') RETURNING id",
+        tenant_id,
+        wa_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_el_eco_cae_en_la_conversacion_que_abrio_el_cliente_y_apaga_la_ia(
+    http_client, tenant_y_usuario, con_secreto, sin_reenvio
+):
+    from services.agente import ingreso
+
+    tid = tenant_y_usuario["tenant_id"]
+    pn = await _numero_coexistencia(tid)
+    numero_id = await fetch_value("SELECT id FROM agentes_canal WHERE phone_number_id = $1", pn)
+    user_id = await _cliente(tid)
+    # Así abre la entrada (ingreso.procesar) la conversación del cliente.
+    conv = await ingreso._conversacion(tid, user_id, "whatsapp", numero_id)
+
+    await _enviar_evento(http_client, _sobre_eco(_eco("wamid.MOVIL", "Hola soy fer"), phone_number_id=pn))
+
+    filas = await fetch_all("SELECT id, status FROM conversations WHERE tenant_id = $1", tid)
+    assert [(f["id"], f["status"]) for f in filas] == [(conv["id"], "transferred")]
+    assert await ingreso.sigue_en_manos_de_la_ia(conv["id"]) is False
+
+
+@pytest.mark.asyncio
+async def test_una_conversacion_heredada_sin_numero_se_adopta_en_vez_de_abrir_otra(
+    tenant_y_usuario,
+):
+    from services.agente import ingreso
+
+    tid = tenant_y_usuario["tenant_id"]
+    pn = await _numero_coexistencia(tid)
+    numero_id = await fetch_value("SELECT id FROM agentes_canal WHERE phone_number_id = $1", pn)
+    user_id = await _cliente(tid)
+    vieja = await fetch_value(
+        "INSERT INTO conversations (tenant_id, user_id, channel_type, status) "
+        "VALUES ($1, $2, 'whatsapp', 'active') RETURNING id",
+        tid,
+        user_id,
+    )
+
+    conv = await ingreso._conversacion(tid, user_id, "whatsapp", numero_id)
+
+    assert conv["id"] == vieja
+    assert await fetch_value("SELECT agente_canal_id FROM conversations WHERE id = $1", vieja) == numero_id
+    assert await fetch_value("SELECT COUNT(*) FROM conversations WHERE tenant_id = $1", tid) == 1
+
+
+@pytest.mark.asyncio
+async def test_la_conversacion_del_numero_gana_a_la_heredada_sin_numero(tenant_y_usuario):
+    from services.agente import ingreso
+
+    tid = tenant_y_usuario["tenant_id"]
+    pn = await _numero_coexistencia(tid)
+    numero_id = await fetch_value("SELECT id FROM agentes_canal WHERE phone_number_id = $1", pn)
+    user_id = await _cliente(tid)
+    del_numero = await fetch_value(
+        "INSERT INTO conversations (tenant_id, user_id, channel_type, status, agente_canal_id, last_message_at) "
+        "VALUES ($1, $2, 'whatsapp', 'transferred', $3, NOW() - INTERVAL '1 hour') RETURNING id",
+        tid,
+        user_id,
+        numero_id,
+    )
+    await execute(
+        "INSERT INTO conversations (tenant_id, user_id, channel_type, status) VALUES ($1, $2, 'whatsapp', 'active')",
+        tid,
+        user_id,
+    )
+
+    conv = await ingreso._conversacion(tid, user_id, "whatsapp", numero_id)
+
+    assert conv["id"] == del_numero
+
+
+@pytest.mark.asyncio
+async def test_el_eco_de_cada_trozo_de_una_respuesta_larga_no_apaga_la_ia(
+    http_client, tenant_y_usuario, con_secreto, sin_reenvio
+):
+    from services.agente import envio, ingreso
+
+    tid = tenant_y_usuario["tenant_id"]
+    pn = await _numero_coexistencia(tid)
+    numero_id = await fetch_value("SELECT id FROM agentes_canal WHERE phone_number_id = $1", pn)
+    user_id = await _cliente(tid)
+    conv = await ingreso._conversacion(tid, user_id, "whatsapp", numero_id)
+    largo = ("Detalle del plan. " * 225).strip() + "\n\nCualquier duda me dices."
+    await execute(
+        "INSERT INTO messages (conversation_id, tenant_id, role, content) VALUES ($1, $2, 'assistant', $3)",
+        conv["id"],
+        tid,
+        largo,
+    )
+    trozos = envio.partir(largo, 4000)
+    assert len(trozos) >= 2 and len(trozos[-1]) < 1000
+
+    for i, trozo in enumerate(trozos):
+        await _enviar_evento(http_client, _sobre_eco(_eco(f"wamid.T{i}", trozo), phone_number_id=pn))
+
+    assert [m["role"] for m in await _mensajes(tid)] == ["assistant"]
+    assert await ingreso.sigue_en_manos_de_la_ia(conv["id"]) is True
+
+
+@pytest.mark.asyncio
+async def test_un_ok_del_movil_no_se_confunde_con_parte_de_una_respuesta_larga(
+    http_client, tenant_y_usuario, con_secreto, sin_reenvio
+):
+    from services.agente import ingreso
+
+    tid = tenant_y_usuario["tenant_id"]
+    pn = await _numero_coexistencia(tid)
+    numero_id = await fetch_value("SELECT id FROM agentes_canal WHERE phone_number_id = $1", pn)
+    user_id = await _cliente(tid)
+    conv = await ingreso._conversacion(tid, user_id, "whatsapp", numero_id)
+    await execute(
+        "INSERT INTO messages (conversation_id, tenant_id, role, content) VALUES ($1, $2, 'assistant', $3)",
+        conv["id"],
+        tid,
+        "ok " * 2000 + "fin",
+    )
+
+    await _enviar_evento(http_client, _sobre_eco(_eco("wamid.OK", "ok"), phone_number_id=pn))
+
+    assert await ingreso.sigue_en_manos_de_la_ia(conv["id"]) is False
