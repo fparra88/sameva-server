@@ -27,6 +27,7 @@ from uuid import uuid4
 import anthropic
 import pytest
 
+from services import uso_ia
 from services.agente import escalar, herramientas, loop_agente, prompt
 from services.agente.modelos import ContextoMensaje
 
@@ -148,6 +149,11 @@ def sin_base(monkeypatch):
     monkeypatch.setattr(prompt, "historial", historial)
     monkeypatch.setattr(prompt, "eventos_de_contexto", eventos)
     monkeypatch.setattr(loop_agente, "_registrar_consumo", registrar)
+
+    async def sin_tope(_tenant):
+        return uso_ia.UsoIA(usadas=0, limite=None, ciclo_inicio=None, ciclo_fin=None)
+
+    monkeypatch.setattr(uso_ia, "uso_ciclo", sin_tope)
 
 
 def usar_cliente(monkeypatch, respuestas) -> ClienteFalso:

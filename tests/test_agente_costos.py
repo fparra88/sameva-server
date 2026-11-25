@@ -254,6 +254,16 @@ async def test_un_modelo_desconocido_registra_tokens_con_costo_nulo(
     assert registrado["tokens_entrada"] == 5000
 
 
+async def test_un_turno_con_tres_llamadas_registra_llamadas_3(contexto, registrado):
+    """El tope de llamadas de IA se mide con este campo: una fila = N llamadas."""
+    await loop_agente._registrar_consumo(
+        contexto, respuesta_con_consumo(llamadas=3)
+    )
+
+    exigir_llamada(registrado)
+    assert registrado["llamadas"] == 3
+
+
 async def test_sin_llamadas_no_se_registra_nada(contexto, registrado):
     """Un mensaje que no llegó al modelo no deja fila de consumo."""
     await loop_agente._registrar_consumo(

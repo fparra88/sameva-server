@@ -601,3 +601,47 @@ async def test_db_externa_nace_desactivada_y_gerencia_puede_activarla(http_clien
     assert r.status_code == 200, r.text
     assert r.json()["herramientas_plan"] == ["db_externa"]
     assert r.json()["herramientas_activo"] is True
+
+
+@pytest.mark.asyncio
+async def test_tope_llamadas_ia_cero_se_guarda_null_en_alta(http_client, gerente, nombre_plan):
+    r = await _crear(http_client, gerente["headers"], nombre=nombre_plan, max_leads_mensuales=0)
+    assert r.status_code == 201, r.text
+    assert r.json()["max_leads_mensuales"] is None
+    fila = await fetch_one("SELECT max_leads_mensuales FROM planes WHERE nombre = $1", nombre_plan)
+    assert fila["max_leads_mensuales"] is None
+
+
+@pytest.mark.asyncio
+async def test_tope_llamadas_ia_alta_con_valor_lo_guarda(http_client, gerente, nombre_plan):
+    r = await _crear(http_client, gerente["headers"], nombre=nombre_plan, max_leads_mensuales=500)
+    assert r.status_code == 201, r.text
+    assert r.json()["max_leads_mensuales"] == 500
+
+
+@pytest.mark.asyncio
+async def test_tope_llamadas_ia_patch_cero_quita_tope_null_no_cambia_y_valor_guarda(
+    http_client, gerente, nombre_plan
+):
+    url = f"/api/gerencia/planes/{nombre_plan}"
+    r = await _crear(http_client, gerente["headers"], nombre=nombre_plan, max_leads_mensuales=300)
+    assert r.json()["max_leads_mensuales"] == 300
+
+    # null = no tocar
+    r = await http_client.patch(
+        url, json={"max_leads_mensuales": None, "descripcion": "x"}, headers=gerente["headers"]
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["max_leads_mensuales"] == 300
+
+    # 0 = quitar tope (NULL)
+    r = await http_client.patch(url, json={"max_leads_mensuales": 0}, headers=gerente["headers"])
+    assert r.status_code == 200, r.text
+    assert r.json()["max_leads_mensuales"] is None
+    fila = await fetch_one("SELECT max_leads_mensuales FROM planes WHERE nombre = $1", nombre_plan)
+    assert fila["max_leads_mensuales"] is None
+
+    # >= 1 = tope
+    r = await http_client.patch(url, json={"max_leads_mensuales": 1}, headers=gerente["headers"])
+    assert r.status_code == 200, r.text
+    assert r.json()["max_leads_mensuales"] == 1

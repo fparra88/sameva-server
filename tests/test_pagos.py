@@ -399,6 +399,73 @@ async def test_suscripcion_de_un_tenant_sin_plan_devuelve_ceros(
     assert datos["plan"] is None
     assert datos["estado_suscripcion"] is None
     assert Decimal(datos["creditos_disponibles"]) == Decimal(0)
+    # Sin plan no hay tope: el bloque existe pero vacío (spec 001 §4.4).
+    assert datos["uso_ia"] == {
+        "usadas": 0, "limite": None, "porcentaje": None, "agotado": False,
+        "ciclo_inicio": None, "ciclo_fin": None, "plan_siguiente": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_suscripcion_muestra_el_uso_de_ia_propio_sin_costes(
+    http_client, tenant_y_usuario
+):
+    """Owner ve su uso y plan siguiente; nada del uso de otro tenant ni de costes."""
+    from datetime import datetime, timedelta, timezone
+
+    tenant_id = tenant_y_usuario["tenant_id"]
+    otro_tenant = uuid4()
+    sufijo = uuid4().hex[:8]
+    plan_a, plan_b = f"t-p7a-{sufijo}", f"t-p7b-{sufijo}"
+    ahora = datetime.now(timezone.utc)
+    await execute("INSERT INTO tenants (id, name) VALUES ($1, 'Otro')", otro_tenant)
+    for nombre, tope, orden in ((plan_a, 4, 9000), (plan_b, 100, 9001)):
+        await execute(
+            """
+            INSERT INTO planes (nombre, precio_monthly, max_leads_mensuales, orden,
+                                stripe_price_id, activo)
+            VALUES ($1, 10, $2, $3, 'price_x', true)
+            """,
+            nombre, tope, orden,
+        )
+    for t in (tenant_id, otro_tenant):
+        await execute(
+            """
+            INSERT INTO tenant_subscriptions (tenant_id, plan, estado, precio_monthly,
+                                              fecha_renovacion)
+            VALUES ($1, $2, 'activa', 10, $3)
+            """,
+            t, plan_a, ahora + timedelta(days=10),
+        )
+    for t, n in ((tenant_id, 4), (otro_tenant, 99)):
+        await execute(
+            "INSERT INTO tenant_token_usage (tenant_id, origen, llamadas, created_at) "
+            "VALUES ($1, 'agente', $2, $3)",
+            t, n, ahora - timedelta(days=1),
+        )
+    try:
+        respuesta = await http_client.get(
+            "/api/pagos/suscripcion",
+            headers={"Authorization": f"Bearer {tenant_y_usuario['token']}"},
+        )
+        assert respuesta.status_code == 200
+        uso = respuesta.json()["uso_ia"]
+        assert uso["usadas"] == 4 and uso["limite"] == 4
+        assert uso["porcentaje"] == 100 and uso["agotado"] is True
+        assert uso["ciclo_inicio"] and uso["ciclo_fin"]
+        assert uso["plan_siguiente"] == plan_b
+        assert set(uso) == {
+            "usadas", "limite", "porcentaje", "agotado",
+            "ciclo_inicio", "ciclo_fin", "plan_siguiente",
+        }
+    finally:
+        await execute(
+            "DELETE FROM tenant_subscriptions WHERE tenant_id = $1", otro_tenant
+        )
+        await execute("DELETE FROM tenant_subscriptions WHERE tenant_id = $1", tenant_id)
+        await execute("DELETE FROM tenant_token_usage WHERE tenant_id = $1", tenant_id)
+        await execute("DELETE FROM planes WHERE nombre = ANY($1::text[])", [plan_a, plan_b])
+        await execute("DELETE FROM tenants WHERE id = $1", otro_tenant)
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,9 @@ ya no admite no se degrada: devuelve 400 y el cliente se queda sin respuesta.
 
     claude-opus-5     piensa por defecto · acepta `effort` · RECHAZA temperature
     claude-sonnet-5   piensa por defecto · acepta `effort` · RECHAZA temperature
-    claude-haiku-4-5  sin pensamiento adaptativo · sin `effort` · acepta temperature
+    claude-haiku-4-5  sin pensamiento adaptativo · sin `effort` · temperature ya
+                      tampoco (la API la rechaza en todos los modelos desde
+                      2026-10-21)
 
 De ahí este módulo: el tenant elige el modelo (`tenant_agent_config.model`) y
 acá se decide qué viaja en la petición.
@@ -51,8 +53,11 @@ class Capacidades:
 _CAPACIDADES: dict[str, Capacidades] = {
     "claude-opus-5": Capacidades(thinking_adaptativo=True, effort=True, vision=True, pdf=True),
     "claude-sonnet-5": Capacidades(thinking_adaptativo=True, effort=True, vision=True, pdf=True),
-    "claude-haiku-4-5": Capacidades(temperature=True, vision=True, pdf=True),
-    "claude-haiku-4-5-20251001": Capacidades(temperature=True, vision=True, pdf=True),
+    # Haiku 4.5 admitía temperature, pero desde la versión de API 2026-10-21 la
+    # Messages API devuelve 400 si llega `temperature`/`top_p`/`top_k` en CUALQUIER
+    # modelo. Por eso ninguno lo lleva en True: la columna se ignora al enviar.
+    "claude-haiku-4-5": Capacidades(vision=True, pdf=True),
+    "claude-haiku-4-5-20251001": Capacidades(vision=True, pdf=True),
 }
 
 DESCONOCIDO = Capacidades()

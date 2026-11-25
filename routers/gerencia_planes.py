@@ -203,7 +203,7 @@ async def crear_plan(
                 datos.precio_monthly,
                 datos.precio_annual,
                 datos.max_vendedores,
-                datos.max_leads_mensuales,
+                datos.max_leads_mensuales or None,  # 0 = sin tope (NULL)
                 datos.creditos_incluidos_mensual,
                 datos.agente_ia_activo,
                 datos.gestion_vendedores_activo,
@@ -315,10 +315,11 @@ async def actualizar_plan(
             "max_proveedores": (
                 anterior["max_proveedores"] if datos.max_proveedores is None else datos.max_proveedores
             ),
+            # None = no tocar; 0 = quitar el tope (se guarda NULL).
             "max_leads_mensuales": (
                 anterior["max_leads_mensuales"]
                 if datos.max_leads_mensuales is None
-                else datos.max_leads_mensuales
+                else (datos.max_leads_mensuales or None)
             ),
             "creditos_incluidos_mensual": (
                 anterior["creditos_incluidos_mensual"]

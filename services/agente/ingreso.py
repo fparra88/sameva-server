@@ -34,7 +34,7 @@ from typing import Any, Optional
 from uuid import UUID
 
 from config import settings
-from services import conversaciones_ocultas, numeros_whatsapp, perfil_contacto
+from services import conversaciones_ocultas, limite_ia, numeros_whatsapp, perfil_contacto, uso_ia
 from services.agente import bajas, medios, multimedia
 from services.agente import normalizar as normalizar_mod
 from services.agente import prompt
@@ -60,6 +60,11 @@ AVISO_SIN_AGENTE = "Gracias por tu mensaje, en breve te atenderemos."
 ACUSE_TRANSFERENCIA = (
     "Ya recibimos tu mensaje. En breve te atiende alguien de nuestro equipo."
 )
+
+# Tope de llamadas de IA del plan agotado (spec 001, D5). Una vez por
+# conversación y ciclo; después, silencio. Tampoco lo genera el modelo.
+AVISO_LIMITE_IA = "En un momento un asesor se pondrá en contacto contigo."
+MOTIVO_LIMITE_IA = "limite_llamadas_ia"
 
 
 async def procesar(peticion: PeticionVerificada) -> ResultadoIngreso:
@@ -178,6 +183,14 @@ async def procesar(peticion: PeticionVerificada) -> ResultadoIngreso:
     # conversación con él, y sin él cliente y eco acababan en dos hilos —en
     # uno la persona tomaba el control y en el otro la IA seguía contestando.
     conversacion = await _conversacion(tenant_id, user_id, mensaje.canal, agente_canal_id)
+
+    # Tope de llamadas de IA agotado (spec 001, D4): el agente no corre para
+    # ninguna conversación, abierta o nueva. Una transferida sigue su camino
+    # normal (el agente ya calla ahí y se avisa a quien la atiende).
+    uso = await _uso_si_agotado(tenant_id)
+    if uso is not None and conversacion["status"] != "transferred":
+        return await _cortar_por_limite_ia(tenant_id, user_id, conversacion, mensaje, uso)
+
     await _completar_nombre(tenant_id, user_id, mensaje)
     guardado = await _guardar_mensaje(tenant_id, conversacion["id"], mensaje)
     if guardado is None:
@@ -513,17 +526,100 @@ async def _guardar_mensaje(
     )
 
 
-async def _registrar_bloqueo(tenant_id: UUID, mensaje: MensajeNormalizado) -> None:
+async def _registrar_bloqueo(
+    tenant_id: UUID, mensaje: MensajeNormalizado, motivo: str = "plan"
+) -> None:
     """Deja el intento en plan_limit_events, para que gerencia lo vea."""
     await execute(
         """
-        INSERT INTO plan_limit_events (tenant_id, canal, usuario_id, mensaje_id)
-        VALUES ($1, $2, $3, NULLIF(NULLIF($4, ''), 'null'))
+        INSERT INTO plan_limit_events (tenant_id, canal, usuario_id, mensaje_id, motivo)
+        VALUES ($1, $2, $3, NULLIF(NULLIF($4, ''), 'null'), $5)
         """,
         tenant_id,
         mensaje.canal,
         mensaje.usuario_id,
         str(mensaje.mensaje_id or ""),
+        motivo,
+    )
+
+
+async def _uso_si_agotado(tenant_id: UUID) -> uso_ia.UsoIA | None:
+    """
+    El uso del ciclo si el tope de llamadas de IA está agotado; None si no.
+
+    Un fallo al consultarlo NO tumba la respuesta al cliente: se registra solo
+    el ID del negocio y se deja pasar al agente.
+    """
+    try:
+        uso = await uso_ia.uso_ciclo(tenant_id)
+    except Exception:  # noqa: BLE001
+        log.exception("No se pudo consultar el uso de IA del tenant %s", tenant_id)
+        return None
+    return uso if uso.agotado else None
+
+
+async def _cortar_por_limite_ia(
+    tenant_id: UUID,
+    user_id: UUID,
+    conversacion: dict[str, Any],
+    mensaje: MensajeNormalizado,
+    uso: uso_ia.UsoIA,
+) -> ResultadoIngreso:
+    """
+    El mensaje se guarda (visible en la Bandeja), el agente NO corre, el dueño
+    recibe una alerta por ciclo y el cliente un aviso una vez por conversación
+    y ciclo. No cambia `status`: al reiniciar el ciclo el agente retoma solo.
+    """
+    await _completar_nombre(tenant_id, user_id, mensaje)
+    guardado = await _guardar_mensaje(tenant_id, conversacion["id"], mensaje)
+    if guardado is None:
+        return ResultadoIngreso(motivo="Mensaje duplicado")
+
+    await execute(
+        "UPDATE conversations SET esperando_reapertura = false, last_message_at = NOW() WHERE id = $1",
+        conversacion["id"],
+    )
+    await _en_vivo(tenant_id, conversacion["id"])
+    await _registrar_bloqueo(tenant_id, mensaje, MOTIVO_LIMITE_IA)
+    await limite_ia.avisar_owner_una_vez(tenant_id, uso)
+
+    ciclo = uso.ciclo_fin.isoformat() if uso.ciclo_fin else ""
+    if (conversacion["metadata"] or {}).get("limite_aviso_ciclo") == ciclo:
+        return ResultadoIngreso(motivo="Tope de llamadas IA: guardado en silencio")
+
+    await execute(
+        """
+        INSERT INTO messages (conversation_id, tenant_id, role, content)
+        VALUES ($1, $2, 'assistant', $3)
+        """,
+        conversacion["id"],
+        tenant_id,
+        AVISO_LIMITE_IA,
+    )
+    await execute(
+        """
+        UPDATE conversations
+           SET last_message_at = NOW(),
+               metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb),
+                                    '{limite_aviso_ciclo}', to_jsonb($2::text))
+         WHERE id = $1
+        """,
+        conversacion["id"],
+        ciclo,
+    )
+    await _en_vivo(tenant_id, conversacion["id"])
+    return ResultadoIngreso(
+        respuesta_inmediata=AVISO_LIMITE_IA,
+        destino=Destino(
+            tenant_id=tenant_id,
+            canal=mensaje.canal,
+            usuario_id=mensaje.usuario_id,
+            nombre=mensaje.nombre,
+            phone_number_id=mensaje.phone_number_id,
+            page_id=mensaje.page_id,
+            conversation_id=conversacion["id"],
+        ),
+        motivo="Tope de llamadas IA: aviso enviado",
     )
 
 

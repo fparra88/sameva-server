@@ -194,6 +194,7 @@ async def registrar_uso_tokens(
     tokens_salida: int,
     costo_usd: Decimal | None,
     idempotency_key: str | None,
+    llamadas: int = 1,
 ) -> bool:
     """
     Anota una llamada al modelo. Devuelve False si la clave de idempotencia
@@ -207,8 +208,8 @@ async def registrar_uso_tokens(
         """
         INSERT INTO tenant_token_usage
             (tenant_id, conversation_id, origen, modelo,
-             tokens_entrada, tokens_salida, costo_usd, idempotency_key)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             tokens_entrada, tokens_salida, costo_usd, idempotency_key, llamadas)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
         DO NOTHING
         """,
@@ -220,6 +221,7 @@ async def registrar_uso_tokens(
         tokens_salida,
         costo_usd,
         idempotency_key,
+        llamadas,
     )
     # asyncpg devuelve el command tag; "INSERT 0 0" = no insertó nada.
     return resultado.endswith(" 1")

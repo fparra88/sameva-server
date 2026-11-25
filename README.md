@@ -473,7 +473,7 @@ GET  /api/gerencia/tenants/{id}/onboarding   lo que contestó (solo lectura, ger
   `max_proveedores` alcanza para el equipo declarado (un cupo solo cuenta si se
   usa ese módulo). Si ninguno cubre todo, el que deja menos afuera, con
   `cubre_todo=false` y `faltantes`. Lee la matriz de la tabla, no una copia.
-- **Prueba:** al aplicar, el plan recomendado por `DIAS_PRUEBA` (14) días: fila
+- **Prueba:** al aplicar, el plan recomendado por `DIAS_PRUEBA` (7) días: fila
   de `tenant_subscriptions` con `origen='prueba'`, `otorgada_por='onboarding'`,
   créditos del plan y asiento `prueba_onboarding` en `gerencia_auditoria`. Una
   sola vez (`prueba_otorgada_en`) y **solo a quien nunca tuvo fila en
@@ -1673,7 +1673,7 @@ suscripción no tienen topes").** Se evalúa en este orden y gana el primero:
 
 | Situación | Límites de modelo/historial, lista de herramientas y cupo de números |
 |---|---|
-| Prueba vigente (cualquier suscripción de origen `prueba` que no terminó, incluida la de 14 días del cuestionario y el piloto sin fecha de fin; una prueba pausada o cancelada no es vigente) | Los del plan asociado a la prueba; si no tiene plan, sin límites y catálogo base completo. **Nunca tope de números** |
+| Prueba vigente (cualquier suscripción de origen `prueba` que no terminó, incluida la de 7 días del cuestionario y el piloto sin fecha de fin; una prueba pausada o cancelada no es vigente) | Los del plan asociado a la prueba; si no tiene plan, sin límites y catálogo base completo. **Nunca tope de números** |
 | Suscripción vigente (`activa` de pago, y el periodo pagado de una cancelada hasta su fin) | Los de su plan, aunque el plan esté desactivado en el catálogo |
 | Sin suscripción vigente (vencida, pausada, prueba terminada sin pagar, o nunca contrató) | Los del **plan más bajo activo**: menor `precio_monthly`; empate: menor cupo (sin tope cuenta como mayor); luego menor id |
 | Ningún plan activo | Sin topes ni límites y catálogo base completo; queda en `gerencia_auditoria` (`plan_sin_tope_por_falta_de_plan_activo`) |

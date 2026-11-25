@@ -1565,6 +1565,7 @@ class TipoAlerta(str, Enum):
     cambio_etapa = "cambio_etapa"
     sin_actividad = "sin_actividad"
     cuota_excedida = "cuota_excedida"
+    limite_llamadas_ia = "limite_llamadas_ia"
     cierre = "cierre"
     reserva_creada = "reserva_creada"
     reserva_cancelada = "reserva_cancelada"
@@ -1773,6 +1774,18 @@ class CheckoutEstadoOut(BaseModel):
     fecha: datetime
 
 
+class UsoIAOut(BaseModel):
+    """Uso de llamadas de IA del ciclo (spec 001). Sin costes ni datos de otros tenants."""
+
+    usadas: int = 0
+    limite: int | None = None
+    porcentaje: int | None = None
+    agotado: bool = False
+    ciclo_inicio: datetime | None = None
+    ciclo_fin: datetime | None = None
+    plan_siguiente: str | None = None
+
+
 class SuscripcionOut(BaseModel):
     """
     Estado de cobros del tenant. Todo nullable salvo los créditos: un
@@ -1797,6 +1810,7 @@ class SuscripcionOut(BaseModel):
     # Hay un Customer de Stripe: se puede abrir el Customer Portal para
     # cancelar o gestionar el plan (POST /pagos/portal-cliente).
     portal_disponible: bool = False
+    uso_ia: UsoIAOut = UsoIAOut()
 
 
 class PortalClienteOut(BaseModel):

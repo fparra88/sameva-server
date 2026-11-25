@@ -21,7 +21,7 @@ import pytest
 from services.acceso_pagos import acceso_pagos
 from services.gerencia import consumo_global, rango_dias, registrar_uso_tokens
 from security import crear_access_token, hash_password
-from session import execute, fetch_one, fetch_value
+from session import execute, fetch_all, fetch_one, fetch_value
 
 
 # ------------------------------------------------------------
@@ -399,6 +399,28 @@ async def test_un_reintento_de_n8n_no_cuenta_dos_veces(db, tenant_id):
     consumo = await consumo_global(await rango_dias(7), tenant_id)
     assert consumo.llamadas == 1
     assert consumo.tokens_total == 920
+
+
+@pytest.mark.asyncio
+async def test_registrar_uso_tokens_guarda_llamadas_y_default_1(db, tenant_id):
+    for llamadas in (None, 3):
+        extra = {} if llamadas is None else {"llamadas": llamadas}
+        await registrar_uso_tokens(
+            tenant_id,
+            conversation_id=None,
+            origen="agente",
+            modelo="gpt-4o-mini",
+            tokens_entrada=10,
+            tokens_salida=5,
+            costo_usd=None,
+            idempotency_key=f"k-{uuid4()}",
+            **extra,
+        )
+    filas = await fetch_all(
+        "SELECT llamadas FROM tenant_token_usage WHERE tenant_id = $1 ORDER BY llamadas",
+        tenant_id,
+    )
+    assert [f["llamadas"] for f in filas] == [1, 3]
 
 
 @pytest.mark.asyncio

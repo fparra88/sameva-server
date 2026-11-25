@@ -8,11 +8,15 @@ Maneja:
 - AsyncClient para llamadas HTTP
 """
 
+import asyncio
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
+from argon2 import PasswordHasher
 from httpx import AsyncClient, ASGITransport
 
+import security
 from main import app, socket_app
 from security import crear_access_token, hash_password
 from session import (
@@ -25,17 +29,69 @@ from session import (
 )
 
 
-@pytest.fixture
-async def db():
-    """
-    Inicializa el pool para cada test.
+# ============================================================
+# UN SOLO EVENT LOOP Y UN SOLO POOL POR SESIÓN
+# ============================================================
+# Antes cada test tenía su loop y abría/cerraba el pool (2 conexiones,
+# ~250 ms en Windows): con ~1500 tests de BD eran ~6 min solo en eso. Un
+# pool de asyncpg está atado al loop que lo creó, así que compartir el pool
+# exige compartir el loop. Todos los tests async y todos los fixtures async
+# (ver `asyncio_default_fixture_loop_scope` en pytest.ini) corren en el loop
+# de la sesión.
+def pytest_collection_modifyitems(items):
+    loop_de_sesion = pytest.mark.asyncio(loop_scope="session")
+    for item in items:
+        if pytest_asyncio.is_async_test(item):
+            item.add_marker(loop_de_sesion, append=False)
 
-    Nota: los tests son lentos porque cada uno reinicia el pool.
-    Si necesitas mejor performance, cambiar a scope="session" después.
-    """
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def _pool_de_sesion():
+    """Se abre la primera vez que un test pide `db`: los tests puros no necesitan Postgres."""
     await init_pool()
     yield
     await close_pool()
+
+
+@pytest.fixture
+async def db(_pool_de_sesion):
+    """El pool compartido de la sesión. Cada test sigue limpiando sus propias filas."""
+    yield
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _sin_tareas_sueltas():
+    """
+    Con un loop por test, cerrarlo cancelaba lo que el test dejara corriendo
+    (avisos push, correo espejo, la espera de ráfaga del agente...). Con el
+    loop compartido eso hay que hacerlo a mano: si no, una tarea de un test
+    seguiría viva en el siguiente, ya con los monkeypatch deshechos, y podría
+    llegar a un servicio real o escribir en la BD de otro test.
+
+    Autouse se arma antes que los fixtures del test y se desarma después, así
+    que esto corre cuando ya terminaron los teardowns del test.
+    """
+    yield
+    actual = asyncio.current_task()
+    sueltas = [t for t in asyncio.all_tasks() if t is not actual and not t.done()]
+    for tarea in sueltas:
+        tarea.cancel()
+    if sueltas:
+        await asyncio.gather(*sueltas, return_exceptions=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _argon2_barato():
+    """
+    Argon2 con los parámetros de producción cuesta ~70 ms por hash y otro
+    tanto por verificación; los tests crean usuarios y hacen login cientos
+    de veces. Acá basta con que sea argon2id y verifique: los parámetros van
+    dentro del propio hash, así que `verify_password` sigue funcionando con
+    cualquier hash existente. Producción no se toca (security._hasher).
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(security, "_hasher", PasswordHasher(time_cost=1, memory_cost=8, parallelism=1))
+        yield
 
 
 @pytest.fixture

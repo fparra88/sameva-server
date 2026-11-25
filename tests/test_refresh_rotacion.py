@@ -136,7 +136,11 @@ async def test_reuso_dentro_de_gracia_no_revoca(http_client, cuenta):
 async def test_reuso_fuera_de_gracia_revoca_todo(http_client, cuenta, monkeypatch):
     import routers.auth as auth_module
 
-    monkeypatch.setattr(auth_module, "_REUSO_GRACIA_SEGUNDOS", 0)
+    # Negativa, no 0: `usado_en` lo pone Postgres (NOW()) y la comparación la
+    # hace Python; en Windows los dos relojes difieren unos ms y la resta
+    # puede salir negativa, que con gracia 0 contaría como "en gracia" (test
+    # intermitente). Con -5 s ningún reuso cae dentro de la ventana.
+    monkeypatch.setattr(auth_module, "_REUSO_GRACIA_SEGUNDOS", -5)
 
     await _login(http_client, cuenta["email"])
     cookie_vieja = http_client.cookies.get(settings.COOKIE_REFRESH_NOMBRE)

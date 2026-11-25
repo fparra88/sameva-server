@@ -44,6 +44,7 @@ from schemas import (
     PlanOut,
     PortalClienteOut,
     SuscripcionOut,
+    UsoIAOut,
     TransaccionOut,
 )
 from services.acceso_plan import HERRAMIENTAS, acceso_plan, herramientas_por_plan
@@ -52,7 +53,7 @@ from services.pagos import (
     marcar_cancelada,
     procesar_pago_aprobado,
 )
-from services import stripe_portal
+from services import stripe_portal, uso_ia
 from services.stripe_pagos import crear_checkout_session, crear_checkout_suscripcion
 from services.stripe_suscripciones import PreparacionCheckout, preparar_checkout_suscripcion
 from session import execute, fetch_all, fetch_one, fetch_value
@@ -585,7 +586,17 @@ async def suscripcion(
             detail="Negocio no encontrado",
         )
 
-    return SuscripcionOut(**dict(fila))
+    uso = await uso_ia.uso_ciclo(tenant_id)
+    uso_out = UsoIAOut(
+        usadas=uso.usadas,
+        limite=uso.limite,
+        porcentaje=uso.porcentaje,
+        agotado=uso.agotado,
+        ciclo_inicio=uso.ciclo_inicio,
+        ciclo_fin=uso.ciclo_fin,
+        plan_siguiente=await uso_ia.plan_siguiente(tenant_id) if uso.limite else None,
+    )
+    return SuscripcionOut(**dict(fila), uso_ia=uso_out)
 
 
 @router.post("/portal-cliente", response_model=PortalClienteOut)

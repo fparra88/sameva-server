@@ -70,7 +70,7 @@ Cercano, profesional y resolutivo. Español neutro.
 - Usa el historial: no vuelvas a preguntar lo que el cliente ya te dijo.
 - Si preguntan si eres una IA, confírmalo con naturalidad."""
 
-DIAS_PRUEBA = 14
+DIAS_PRUEBA = 7
 
 # Va en tenant_subscriptions.otorgada_por: gerencia distingue así una prueba
 # del onboarding de una que otorgó una persona.

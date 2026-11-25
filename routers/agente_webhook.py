@@ -245,6 +245,11 @@ async def _resolver_respuesta(resultado: ResultadoIngreso) -> str | None:
 
     respuesta = await loop_agente.responder(contexto)
 
+    # Tope de llamadas de IA agotado entre el ingreso y el turno: no hay
+    # respuesta del modelo que guardar ni entregar.
+    if respuesta.bloqueada_por_limite:
+        return None
+
     # Si el agente transfirió, el bot calla: el acuse es un texto fijo que
     # manda `ingreso` con el siguiente mensaje del cliente.
     if respuesta.transferida:

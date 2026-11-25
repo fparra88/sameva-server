@@ -77,7 +77,7 @@ from uuid import UUID
 import anthropic
 
 from config import settings
-from services import archivos_envio
+from services import archivos_envio, uso_ia
 from services.agente import costos, escalar, herramientas, modelo as modelo_mod, multimedia, prompt
 from services.agente.modelos import ContextoMensaje
 from session import execute
@@ -130,6 +130,9 @@ class Respuesta:
     herramientas: list[dict[str, Any]] = field(default_factory=list)
     # La API falló y `texto` es el mensaje genérico, no una respuesta del modelo.
     fallo: bool = False
+    # El tope de llamadas de IA del plan está agotado: el modelo no se invocó
+    # y no hay nada que entregar (spec 001, D4).
+    bloqueada_por_limite: bool = False
 
 
 @lru_cache
@@ -164,6 +167,22 @@ async def responder(
     `historial_previo`), no registra consumo, no cobra créditos, no transfiere
     y las herramientas con efectos se simulan.
     """
+    # Defensa en profundidad del tope de llamadas de IA (spec 001, D4): cubre
+    # reintentos y ráfagas que ya pasaron `ingreso`. "Probar agente" cuenta
+    # pero nunca se bloquea (Q2). Si la consulta falla se deja pasar.
+    if not simulacion:
+        try:
+            uso = await uso_ia.uso_ciclo(contexto.tenant_id)
+        except Exception:  # noqa: BLE001
+            log.exception("No se pudo consultar el uso de IA del tenant %s", contexto.tenant_id)
+        else:
+            if uso.agotado:
+                log.info(
+                    "Tope de llamadas IA agotado: el tenant %s no invoca al modelo",
+                    contexto.tenant_id,
+                )
+                return Respuesta(texto="", bloqueada_por_limite=True)
+
     config = contexto.config
     if config is None:
         if contexto.agente_canal_id is not None:
@@ -545,6 +564,7 @@ async def _registrar_consumo(contexto: ContextoMensaje, respuesta: Respuesta) ->
             tokens_salida=respuesta.consumo.salida,
             costo_usd=costo,
             idempotency_key=f"msg:{contexto.db_message_id}:agente",
+            llamadas=respuesta.consumo.llamadas,
         )
         if registrado:
             await execute(
