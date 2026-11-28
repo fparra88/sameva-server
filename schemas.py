@@ -3528,6 +3528,13 @@ class PlantillaCrearIn(BaseModel):
     botones: list[PlantillaBotonIn] = Field(default_factory=list, max_length=10)
 
 
+class PlantillaUsoAviso(BaseModel):
+    """Aviso de cita (spec 007) que tiene asignada la plantilla. `activo` = está encendido."""
+
+    tipo: Literal["recordatorio", "cancelacion"]
+    activo: bool
+
+
 class PlantillaTenantOut(BaseModel):
     nombre: str
     idioma: str
@@ -3540,6 +3547,43 @@ class PlantillaTenantOut(BaseModel):
     variable_encabezado: bool = False
     actualizada_en: datetime
     sincronizada_en: datetime | None = None
+    # Avisos de cita que la usan. Borrarla con uno activo pide `forzar=true` (409 si no).
+    en_uso_por: list[PlantillaUsoAviso] = Field(default_factory=list)
+    # Cuenta de WhatsApp Business (sql/81): la WABA en Meta directo, "unica" en NeuroAPI.
+    cuenta: str = "unica"
+
+
+class NumeroDeCuentaOut(BaseModel):
+    id: UUID | None = None
+    telefono_visible: str | None = None
+    es_principal: bool = False
+
+
+class CuentaPlantillasOut(BaseModel):
+    """Una WABA del negocio: sus números comparten las mismas plantillas."""
+
+    clave: str
+    numeros: list[NumeroDeCuentaOut] = Field(default_factory=list)
+    # Es la del número principal: la que usan los avisos de cita.
+    de_avisos: bool = False
+
+
+class CuentasPlantillasOut(BaseModel):
+    """GET /plantillas-whatsapp/mis-cuentas. `proveedor` None = sin WhatsApp conectado."""
+
+    proveedor: Literal["meta", "neuroapi"] | None = None
+    cuentas: list[CuentaPlantillasOut] = Field(default_factory=list)
+    # `varias_cuentas_neuroapi`: se puede mirar, pero crear/borrar/probar da 409.
+    bloqueo: str | None = None
+    mensaje_bloqueo: str | None = None
+
+
+class EnviarPlantillaIn(BaseModel):
+    """Body de POST .../conversaciones/{id}/plantilla (plantilla aprobada desde la Bandeja)."""
+
+    nombre: str = Field(min_length=1, max_length=512)
+    valores_cuerpo: list[str] = Field(default_factory=list, max_length=20)
+    valor_encabezado: str | None = Field(default=None, max_length=200)
 
 
 class PlantillaPruebaIn(BaseModel):

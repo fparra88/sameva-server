@@ -32,6 +32,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from config import settings
+from services import plantillas_tenant, plantillas_whatsapp
 from services.agente import envio, escalar, firma, ingreso, loop_agente
 from services.agente import normalizar as normalizar_mod
 from services.agente.modelos import (
@@ -40,6 +41,7 @@ from services.agente.modelos import (
     PeticionVerificada,
     ResultadoIngreso,
 )
+from services.plantillas_whatsapp import es_evento_de_plantilla
 from session import execute
 
 log = logging.getLogger("operativai.agente.webhook")
@@ -121,6 +123,14 @@ async def entrada(request: Request) -> Response:
     if peticion.origen == "widget":
         return await _atender_widget(peticion)
 
+    # Cambio de estado de una plantilla (Meta directo): no es un mensaje. Va a
+    # la caché de plantillas como el de NeuroAPI y nunca entra al agente.
+    if peticion.origen == "meta" and es_evento_de_plantilla(peticion.cuerpo):
+        tarea = asyncio.create_task(_aplicar_estado_de_plantillas(peticion.cuerpo))
+        _EN_CURSO.add(tarea)
+        tarea.add_done_callback(_EN_CURSO.discard)
+        return PlainTextResponse("EVENT_RECEIVED")
+
     # Meta espera el acuse ya. El resto corre suelto: el agente puede
     # tardar varios segundos entre el modelo y las herramientas.
     tarea = asyncio.create_task(_procesar_en_segundo_plano(peticion))
@@ -198,6 +208,26 @@ async def _atender_widget(peticion: PeticionVerificada) -> JSONResponse:
 
     respuesta = await _resolver_respuesta(resultado)
     return JSONResponse({"respuesta": respuesta}, headers=cabeceras)
+
+
+async def _aplicar_estado_de_plantillas(evento: dict[str, Any]) -> None:
+    """
+    `message_template_status_update` llegado por la app de Meta del negocio (la
+    firma ya se validó con el app_secret de su WABA). Mismos dos pasos que el
+    webhook de NeuroAPI (routers/canales_neuroapi_webhook.py): la cuenta global
+    de avisos y las plantillas de cada negocio, que con REJECTED/PAUSED/DISABLED
+    apagan el aviso de cita que las usa y alertan. Cada uno por separado para que
+    el fallo de uno no deje sin aplicar el otro; nunca lanza (ya se dio el acuse).
+    """
+    try:
+        await plantillas_whatsapp.aplicar_evento_meta(evento)
+    except Exception:
+        log.exception("No se pudo aplicar el evento de estado de plantilla global (Meta directo)")
+    try:
+        cambios = await plantillas_tenant.aplicar_evento_meta(evento)
+        log.info("Estado de plantillas por Meta directo: %d cambio(s) aplicado(s)", len(cambios))
+    except Exception:
+        log.exception("No se pudo aplicar el evento de estado de plantilla de un negocio (Meta directo)")
 
 
 async def _procesar_en_segundo_plano(peticion: PeticionVerificada) -> None:

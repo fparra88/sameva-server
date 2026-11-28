@@ -43,6 +43,18 @@ _TIPOS_WHATSAPP = frozenset({"image", "document", "audio"})
 _TIPOS_INSTAGRAM = frozenset({"image", "file", "audio"})
 _TIPOS_AUDIO = frozenset({"audio"})
 
+# Descargas en curso por conversación (en este proceso). La pasada que
+# contesta una ráfaga tiene que esperar también los adjuntos de los mensajes
+# ANTERIORES de esa ráfaga: el cliente manda la foto y enseguida "¿tienen
+# esto?", la pasada de la foto se calla (hay un mensaje más nuevo) y la del
+# texto agrupaba antes de que la foto terminara de bajarse, así que el modelo
+# veía "[Imagen]" y contestaba que no podía verla.
+_EN_CURSO: dict[UUID, set[asyncio.Task]] = {}
+
+# Lo máximo que una pasada espera los adjuntos de otras (descarga 20 s +
+# transcripción 30 s). Pasado eso se contesta con lo que haya.
+ESPERA_MAXIMA_S = 45.0
+
 
 def lanzar(
     tenant_id: UUID,
@@ -57,11 +69,46 @@ def lanzar(
         or (mensaje.canal == "instagram" and proveedor == "neuroapi" and mensaje.tipo in _TIPOS_INSTAGRAM)
     )
     if not se_baja:
+        if mensaje.tipo in _TIPOS_WHATSAPP | _TIPOS_INSTAGRAM:
+            # Sin esto, un adjunto que nunca se intentó bajar no deja rastro y
+            # solo se nota porque el agente dice que no puede verlo.
+            log.info(
+                "Adjunto del mensaje %s no se descarga (tenant %s): canal=%s tipo=%s media_id=%s proveedor=%s",
+                message_id, tenant_id, mensaje.canal, mensaje.tipo,
+                "si" if mensaje.media_id else "no", proveedor,
+            )
         return None
-    return asyncio.create_task(
+    tarea = asyncio.create_task(
         procesar(tenant_id, conversation_id, message_id, mensaje),
         name=f"medios:{message_id}",
     )
+    en_curso = _EN_CURSO.setdefault(conversation_id, set())
+    en_curso.add(tarea)
+
+    def _soltar(t: asyncio.Task) -> None:
+        en_curso.discard(t)
+        if not en_curso and _EN_CURSO.get(conversation_id) is en_curso:
+            del _EN_CURSO[conversation_id]
+
+    tarea.add_done_callback(_soltar)
+    return tarea
+
+
+async def esperar_conversacion(conversation_id: UUID, timeout: float = ESPERA_MAXIMA_S) -> None:
+    """
+    Espera las descargas en curso de la conversación (de cualquier mensaje),
+    con tope. Nunca lanza ni cancela las tareas: si se pasa del tope, siguen
+    en segundo plano y el adjunto queda para el portal.
+    """
+    pendientes = {t for t in _EN_CURSO.get(conversation_id, ()) if not t.done()}
+    if not pendientes:
+        return
+    _, sin_terminar = await asyncio.wait(pendientes, timeout=timeout)
+    if sin_terminar:
+        log.warning(
+            "Conversación %s: %s adjunto(s) siguen bajándose tras %s s; se contesta sin ellos",
+            conversation_id, len(sin_terminar), timeout,
+        )
 
 
 async def procesar(
@@ -99,9 +146,11 @@ async def _procesar(
             nombre=mensaje.contenido if mensaje.tipo == "document" else None,
         )
     except adjuntos.AdjuntoInvalido as e:
+        # `e.mensaje` es texto nuestro (nunca contenido del archivo ni del
+        # proveedor): dice qué falta, p. ej. NEUROAPI_WA_MEDIA_PATH.
         log.warning(
-            "Adjunto del mensaje %s no guardado (tenant %s): %s",
-            message_id, tenant_id, e.status_code,
+            "Adjunto del mensaje %s no guardado (tenant %s, canal %s): %s %s",
+            message_id, tenant_id, mensaje.canal, e.status_code, e.mensaje,
         )
         return False
 

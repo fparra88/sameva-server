@@ -111,6 +111,39 @@ def verificar_token_interno(cabeceras: dict[str, str]) -> UUID:
 # ============================================================
 # 3. Meta directo (X-Hub-Signature-256)
 # ============================================================
+# Remitente "WABA" (sql/81): los eventos de estado de plantilla de Meta directo.
+CANAL_WABA = "whatsapp_waba"
+
+
+def _es_estado_de_plantilla(cuerpo: dict[str, Any]) -> bool:
+    # Import perezoso: es la única definición de "sobre de plantillas" (también la usa
+    # el webhook de NeuroAPI) y ese módulo arrastra la auditoría de gerencia.
+    from services.plantillas_whatsapp import es_evento_de_plantilla
+
+    return es_evento_de_plantilla(cuerpo)
+
+
+async def _secreto_de_waba(waba_id: str) -> str | None:
+    """
+    El app_secret de un negocio de Meta directo dueño de esa WABA. Se llega por un
+    número suyo de la WABA (`agentes_canal.waba_id`) y la línea de channel_credentials
+    del negocio, que es lo que sabe descifrar `obtiene_app_secret`. WABA desconocida =
+    None (se rechaza, igual que un número que no es nuestro).
+    """
+    return await fetch_value(
+        """
+        SELECT obtiene_app_secret('whatsapp', cc.phone_number_id)
+        FROM agentes_canal ac
+        JOIN channel_credentials cc
+          ON cc.tenant_id = ac.tenant_id AND cc.channel_type = 'whatsapp'
+         AND cc.is_active = true AND cc.bsp_provider = 'meta'
+        WHERE ac.waba_id = $1 AND ac.estado <> 'desvinculado'
+        LIMIT 1
+        """,
+        waba_id,
+    )
+
+
 def identificar_remitente(cuerpo: dict[str, Any]) -> tuple[str | None, str | None]:
     """
     Canal y cuenta receptora, para saber con qué `app_secret` firmar.
@@ -123,7 +156,12 @@ def identificar_remitente(cuerpo: dict[str, Any]) -> tuple[str | None, str | Non
 
     if objeto == "whatsapp_business_account":
         valor = ((entry.get("changes") or [{}])[0] or {}).get("value") or {}
-        return "whatsapp", (valor.get("metadata") or {}).get("phone_number_id")
+        numero = (valor.get("metadata") or {}).get("phone_number_id")
+        if not numero and _es_estado_de_plantilla(cuerpo):
+            # Un cambio de estado de plantilla es de la WABA, no de un número: no
+            # trae metadata.phone_number_id, solo `entry.id` (la WABA).
+            return CANAL_WABA, entry.get("id")
+        return "whatsapp", numero
     if objeto == "instagram":
         return "instagram", entry.get("id")
     if objeto == "page":
@@ -158,7 +196,10 @@ async def verificar_firma_meta(cuerpo_crudo: bytes, cabeceras: dict[str, str]) -
     if not canal or not identificador:
         raise FirmaInvalida("No se pudo identificar al remitente")
 
-    secreto = await fetch_value("SELECT obtiene_app_secret($1, $2)", canal, str(identificador))
+    if canal == CANAL_WABA:
+        secreto = await _secreto_de_waba(str(identificador))
+    else:
+        secreto = await fetch_value("SELECT obtiene_app_secret($1, $2)", canal, str(identificador))
     if not secreto:
         raise FirmaInvalida(f"Sin app_secret para el remitente {canal}")
 

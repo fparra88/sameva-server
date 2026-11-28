@@ -19,6 +19,7 @@ mismo hilo, y para devolverle el control a la IA con un UPDATE que ese
 workflow ya sabe leer.
 """
 
+import logging
 import secrets
 from dataclasses import dataclass
 from uuid import UUID
@@ -27,7 +28,9 @@ from fastapi import HTTPException, status
 
 from config import settings
 from services import adjuntos, almacen_archivos, mensajeria, meta, whatsapp
-from session import execute, fetch_all, fetch_one, transaccion
+from session import execute, fetch_all, fetch_one, fetch_value, transaccion
+
+log = logging.getLogger("operativai.conversaciones")
 
 # n8n arma el INSERT de `users` con expresiones de plantilla que, cuando el
 # dato de origen viene undefined, terminan guardando el texto literal
@@ -645,6 +648,17 @@ async def enviar_mensaje_humano(
         except meta.MetaError as e:
             raise meta.a_http(e)
 
+    return await _guardar_humano(tenant_id, conversacion_id, texto, sender_portal_user_id, wamid)
+
+
+async def _guardar_humano(
+    tenant_id: UUID,
+    conversacion_id: UUID,
+    texto: str,
+    sender_portal_user_id: UUID,
+    wamid: str | None,
+):
+    """Deja en `messages` (role='human') lo que ya se le entregó al cliente."""
     # Si el eco de coexistencia ganó la carrera y ya guardó este wamid, se le
     # asigna el remitente del portal en vez de insertar un duplicado.
     fila = await fetch_one(
@@ -668,6 +682,128 @@ async def enviar_mensaje_humano(
         conversacion_id,
     )
     return fila
+
+
+# ============================================================
+# Plantillas aprobadas desde la Bandeja
+# ============================================================
+async def plantillas_para_conversacion(tenant_id: UUID, conversacion_id: UUID) -> list[dict]:
+    """
+    Las plantillas APPROVED del negocio, para el selector del composer. Va por
+    la conversación (y no por /plantillas-whatsapp) porque quien atiende la
+    Bandeja puede ser un vendedor, que no entra al catálogo de Ajustes. Solo
+    WhatsApp: en otros canales no hay plantillas (lista vacía). Con varias cuentas
+    de WhatsApp Business (sql/81), solo las de la cuenta del número de la
+    conversación: en otra WABA la plantilla no existe y Meta la rechazaría.
+    """
+    from services import plantillas_cuentas, plantillas_tenant
+
+    conv = await fetch_one(
+        "SELECT channel_type, agente_canal_id FROM conversations WHERE id = $1 AND tenant_id = $2",
+        conversacion_id,
+        tenant_id,
+    )
+    if conv is None or conv["channel_type"] != "whatsapp":
+        return []
+    waba = await plantillas_cuentas.waba_cache_de_numero(tenant_id, conv["agente_canal_id"])
+    filas = await plantillas_tenant.listar(tenant_id, estado="APPROVED", waba_id=waba)
+    return [plantillas_tenant.a_salida(f) for f in filas]
+
+
+async def enviar_plantilla_humano(
+    tenant_id: UUID,
+    conversacion_id: UUID,
+    nombre: str,
+    valores_cuerpo: list[str],
+    valor_encabezado: str | None,
+    sender_portal_user_id: UUID,
+):
+    """
+    Manda una plantilla APPROVED del negocio al cliente de la conversación y
+    la deja en `messages` (role='human') con el texto que recibió. Es la única
+    forma de escribirle cuando la ventana de 24 h está cerrada.
+
+    Mismas reglas que una respuesta manual (`_preparar_envio`: modo humano,
+    número de la conversación) más dos propias: solo WhatsApp, y nunca a un
+    cliente que pidió la baja (es un mensaje que él no pidió). Si Meta dice
+    que la plantilla ya no está disponible, se marca en la caché igual que en
+    los avisos de cita (puede apagar un aviso y alertar).
+    """
+    # Imports perezosos: estos módulos arrastran Meta/NeuroAPI y el agente.
+    from services import plantillas_cuentas
+    from services import plantillas_reglas as reglas
+    from services import plantillas_tenant
+    from services.agente import bajas
+    from services.meta_plantillas import _EnvioPlantillaMeta
+
+    canal, destinatario, cred = await _preparar_envio(tenant_id, conversacion_id)
+    if canal != "whatsapp":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Las plantillas solo se pueden enviar por WhatsApp",
+        )
+
+    # La plantilla de la cuenta (WABA) del número por el que sale el mensaje.
+    agente_canal_id = await fetch_value(
+        "SELECT agente_canal_id FROM conversations WHERE id = $1 AND tenant_id = $2",
+        conversacion_id,
+        tenant_id,
+    )
+    waba = await plantillas_cuentas.waba_cache_de_numero(tenant_id, agente_canal_id)
+    plantilla = await plantillas_tenant.obtener(tenant_id, nombre, waba_id=waba)
+    if plantilla is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plantilla no encontrada")
+    if plantilla["estado"] != "APPROVED":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"codigo": "plantilla_no_aprobada", "mensaje": "Solo se pueden enviar plantillas aprobadas por Meta"},
+        )
+    try:
+        componentes = reglas.parametros_de_envio(plantilla["componentes"], valores_cuerpo, valor_encabezado)
+    except reglas.PlantillaInvalida as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+
+    if await bajas.esta_de_baja(tenant_id, canal, destinatario):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"codigo": "cliente_de_baja", "mensaje": "El cliente pidió no recibir más mensajes de este negocio"},
+        )
+
+    if cred["bsp_provider"] == "neuroapi":
+        proveedor = whatsapp.NeuroApiProvider(
+            api_key=cred["access_token"],
+            webhook_secret="",
+            base_url=settings.NEUROAPI_API_BASE_URL,
+            phone_number_id=cred["phone_number_id"] or "",
+        )
+    else:
+        if not cred["phone_number_id"]:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Falta phone_number_id para enviar por WhatsApp",
+            )
+        proveedor = _EnvioPlantillaMeta(phone_number_id=cred["phone_number_id"], token=cred["access_token"])
+
+    try:
+        enviado = await proveedor.enviar_plantilla_con_componentes(
+            destinatario, plantilla["nombre"], plantilla["idioma"], componentes
+        )
+    except whatsapp.ProveedorWhatsAppError as e:
+        estado = plantillas_tenant.estado_por_error_de_envio(e.cuerpo)
+        if estado is not None:
+            try:
+                await plantillas_tenant.marcar_estado_por_error(
+                    tenant_id, plantilla["nombre"], estado, waba_id=plantilla.get("waba_id")
+                )
+            except Exception:  # noqa: BLE001 — marcarla no puede tapar el error del envío
+                log.exception("No se pudo marcar la plantilla %r del negocio %s", plantilla["nombre"], tenant_id)
+        raise whatsapp.a_http(e)
+
+    texto = reglas.texto_enviado(plantilla["componentes"], valores_cuerpo, valor_encabezado)
+    return await _guardar_humano(
+        tenant_id, conversacion_id, texto or f"[Plantilla: {plantilla['nombre']}]",
+        sender_portal_user_id, enviado.id_mensaje or None,
+    )
 
 
 # ============================================================

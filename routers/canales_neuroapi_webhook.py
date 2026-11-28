@@ -315,6 +315,13 @@ async def _procesar_conexion(
                 telefono_visible=phone_number,
                 connection_mode=fila["connection_mode"],
             )
+            # La WABA del número (sql/81): las plantillas son de la WABA, y con
+            # varios números hay que saber si comparten cuenta. Solo si quedó
+            # vinculado a este negocio (uno ajeno no se toca).
+            if resultado.resultado in ("vinculado", "propio") and waba_id:
+                from services.plantillas_cuentas import guardar_waba
+
+                await guardar_waba(fila["tenant_id"], str(phone_number_id), str(waba_id))
             await execute(
                 "UPDATE neuroapi_connect_sessions SET detalle = $2, updated_at = NOW() "
                 "WHERE session_id = $1",

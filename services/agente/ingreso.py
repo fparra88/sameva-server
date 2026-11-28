@@ -708,10 +708,15 @@ async def _esperar_rafaga(contexto: ContextoMensaje) -> bool:
     """
     await asyncio.sleep(settings.AGENTE_ANTIFLOOD_SEGUNDOS)
     # El adjunto de este mensaje se bajaba mientras tanto: hay que tenerlo
-    # (y la transcripción, si era audio) antes de agrupar. Los de mensajes
-    # anteriores de la ráfaga los esperó su propia pasada.
+    # (y la transcripción, si era audio) antes de agrupar.
     if contexto.tarea_medios is not None:
         await contexto.tarea_medios
+    # Y los de los mensajes ANTERIORES de la ráfaga: su pasada se calla al ver
+    # este mensaje, así que nadie más los espera. Sin esto, "foto + ¿tienen
+    # esto?" agrupaba antes de que la foto terminara de bajarse y el modelo
+    # solo veía "[Imagen]". Va antes de mirar si hay uno más nuevo, para que
+    # esa comprobación cubra también el tiempo de espera.
+    await medios.esperar_conversacion(contexto.conversation_id)
 
     hay_mas_nuevo = await fetch_one(
         """

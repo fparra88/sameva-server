@@ -163,33 +163,25 @@ async def test_fallo_de_red_es_502(monkeypatch):
 # ------------------------------------------------------------
 # Factory de proveedor (NeuroAPI vs Meta directo, según bsp_provider)
 # ------------------------------------------------------------
-async def test_servicio_elige_segun_bsp_provider(monkeypatch):
+async def test_servicio_elige_segun_el_proveedor_de_la_cuenta(monkeypatch):
     import routers.plantillas_whatsapp_tenant as router_mod
+    from services import plantillas_cuentas as pc
 
     class _ServicioNeuroApi:
         @classmethod
         async def desde_tenant(cls, tenant_id):
             return "neuroapi-instancia"
 
-    class _ServicioMeta:
-        @classmethod
-        async def desde_tenant(cls, tenant_id):
-            return "meta-instancia"
-
     monkeypatch.setattr(router_mod, "NeuroApiTemplateService", _ServicioNeuroApi)
-    monkeypatch.setattr(router_mod, "MetaTemplateService", _ServicioMeta)
+    unica = pc.Cuenta(clave="unica", waba_cache=None)
+    neuro = pc.Cuentas(proveedor="neuroapi", cuentas=[unica])
+    assert await router_mod._servicio(TENANT, neuro, unica) == "neuroapi-instancia"
 
-    async def _neuroapi(*args, **kwargs):
-        return "neuroapi"
-
-    async def _meta(*args, **kwargs):
-        return "meta"
-
-    monkeypatch.setattr(router_mod, "fetch_value", _neuroapi)
-    assert await router_mod._servicio(TENANT) == "neuroapi-instancia"
-
-    monkeypatch.setattr(router_mod, "fetch_value", _meta)
-    assert await router_mod._servicio(TENANT) == "meta-instancia"
+    # Meta directo: Graph contra la WABA de ESA cuenta, no la del primer número.
+    w2 = pc.Cuenta(clave="W2", waba_cache="W2")
+    meta = pc.Cuentas(proveedor="meta", cuentas=[pc.Cuenta(clave="W1", waba_cache="W1"), w2], token="tok")
+    servicio = await router_mod._servicio(TENANT, meta, w2)
+    assert servicio.waba_id == "W2"
 
 
 # ------------------------------------------------------------
@@ -275,13 +267,24 @@ class _Cache:
     def instalar(self, mp: pytest.MonkeyPatch) -> None:
         c = self
 
-        async def obtener(tenant_id, nombre):
-            return c.filas.get((tenant_id, nombre))
+        # Clave (tenant, nombre) para la cuenta única —como antes de sql/81— y
+        # (tenant, nombre, waba) para una WABA concreta de Meta directo.
+        def clave(tenant_id, nombre, waba):
+            return (tenant_id, nombre) if waba is None else (tenant_id, nombre, waba)
 
-        async def listar(tenant_id, *, categoria=None, estado=None):
+        def de_cuenta(k, waba):
+            return waba is cache.TODAS or (len(k) == 2 and waba is None) or (len(k) == 3 and k[2] == waba)
+
+        async def obtener(tenant_id, nombre, *, waba_id=cache.TODAS):
+            for k, f in c.filas.items():
+                if k[0] == tenant_id and k[1] == nombre and de_cuenta(k, waba_id):
+                    return f
+            return None
+
+        async def listar(tenant_id, *, categoria=None, estado=None, waba_id=cache.TODAS):
             return [
-                f for (t, _), f in c.filas.items()
-                if t == tenant_id
+                f for k, f in c.filas.items()
+                if k[0] == tenant_id and de_cuenta(k, waba_id)
                 and (categoria is None or f["categoria"] == categoria)
                 and (estado is None or f["estado"] == estado)
             ]
@@ -289,17 +292,29 @@ class _Cache:
         async def guardar(tenant_id, datos, *, creada_por=None, sincronizada):
             from datetime import datetime, timezone
 
-            c.filas[(tenant_id, datos["nombre"])] = {
+            c.filas[clave(tenant_id, datos["nombre"], datos.get("waba_id"))] = {
                 **datos, "motivo_rechazo": datos.get("motivo_rechazo"),
                 "actualizada_en": datetime.now(timezone.utc), "sincronizada_en": None,
             }
 
-        async def borrar_local(tenant_id, nombre):
-            c.filas.pop((tenant_id, nombre), None)
+        async def borrar_local(tenant_id, nombre, *, waba_id=cache.TODAS):
+            for k in [k for k in c.filas if k[0] == tenant_id and k[1] == nombre and de_cuenta(k, waba_id)]:
+                c.filas.pop(k)
+
+        async def sin_otra(tenant_id, nombre):
+            return not any(k[0] == tenant_id and k[1] == nombre for k in c.filas)
+
+        mp.setattr(cache, "_sin_otra_con_ese_nombre", sin_otra)
 
         async def apagar_funcion(tenant_id, nombre):
             return None  # T6: DELETE llama a reaccion_estado; aquí ninguna función de aviso está activa
 
+        c.usos: dict[str, list[dict[str, Any]]] = {}
+
+        async def usos_en_avisos(tenant_id):
+            return c.usos if tenant_id == TENANT else {}
+
+        mp.setattr(cache, "usos_en_avisos", usos_en_avisos)
         mp.setattr(cache, "_apagar_funcion_bd", apagar_funcion)
         mp.setattr(cache, "obtener", obtener)
         mp.setattr(cache, "listar", listar)
@@ -337,14 +352,16 @@ def api(monkeypatch):
     _Servicio.fallo = None
     monkeypatch.setattr("routers.plantillas_whatsapp_tenant.NeuroApiTemplateService", _Servicio)
 
-    # _servicio()/_proveedor_envio() miran bsp_provider antes de elegir entre
-    # NeuroAPI y Meta: sin BD real en estos tests, se fija en 'neuroapi' (el
-    # valor por defecto de channel_credentials) para no romper estas pruebas,
-    # que son todas de un negocio de NeuroAPI.
-    async def _bsp_provider(*args, **kwargs):
-        return "neuroapi"
+    # Sin BD: el negocio tiene UNA cuenta de NeuroAPI (el caso de casi todos).
+    # Las pruebas de varias cuentas cambian `c.cuentas`.
+    from services import plantillas_cuentas as pc
 
-    monkeypatch.setattr("routers.plantillas_whatsapp_tenant.fetch_value", _bsp_provider)
+    c.cuentas = pc.Cuentas(proveedor="neuroapi", cuentas=[pc.Cuenta(clave="unica", waba_cache=None)], clave_avisos="unica")
+
+    async def resolver(tenant_id):
+        return c.cuentas
+
+    monkeypatch.setattr("routers.plantillas_whatsapp_tenant.cuentas_svc.resolver", resolver)
     actual = {"u": _usuario("owner")}
 
     async def _u() -> UsuarioActual:
@@ -428,3 +445,185 @@ async def test_prueba_solo_de_plantillas_aprobadas(api):
     await _llamar("POST", RUTA, json=NUEVA)
     r = await _llamar("POST", f"{RUTA}/promo/prueba", json={"telefono": "593999999999", "valores_cuerpo": ["Ana"]})
     assert r.status_code == 409
+
+
+# ------------------------------------------------------------
+# Uso en avisos de cita (en_uso_por) y borrado protegido
+# ------------------------------------------------------------
+def test_usos_de_config_cuenta_activos_y_apagados():
+    fila = {
+        "nombre_plantilla_recordatorio": "recordatorio_cita", "recordatorio_activo": True,
+        "nombre_plantilla_cancelacion": "recordatorio_cita", "cancelacion_activo": False,
+    }
+    assert cache.usos_de_config(fila) == {
+        "recordatorio_cita": [{"tipo": "recordatorio", "activo": True}, {"tipo": "cancelacion", "activo": False}]
+    }
+    assert cache.usos_de_config(None) == {}
+
+
+async def test_lista_y_detalle_dicen_que_aviso_la_usa(api):
+    await _llamar("POST", RUTA, json=NUEVA)
+    api.usos = {"promo": [{"tipo": "recordatorio", "activo": False}]}
+    lista = (await _llamar("GET", RUTA)).json()
+    assert lista[0]["en_uso_por"] == [{"tipo": "recordatorio", "activo": False}]
+    assert (await _llamar("GET", f"{RUTA}/promo")).json()["en_uso_por"] == [{"tipo": "recordatorio", "activo": False}]
+
+
+async def test_borrar_la_de_un_aviso_encendido_pide_forzar(api):
+    await _llamar("POST", RUTA, json=NUEVA)
+    api.usos = {"promo": [{"tipo": "cancelacion", "activo": True}]}
+    r = await _llamar("DELETE", f"{RUTA}/promo?confirmar=true")
+    assert r.status_code == 409 and r.json()["detail"]["codigo"] == "plantilla_en_uso"
+    assert r.json()["detail"]["en_uso_por"] == [{"tipo": "cancelacion", "activo": True}]
+    assert ("eliminar", "promo") not in _Servicio.llamadas and (TENANT, "promo") in api.filas
+    assert (await _llamar("DELETE", f"{RUTA}/promo?confirmar=true&forzar=true")).status_code == 204
+    assert (TENANT, "promo") not in api.filas
+
+
+async def test_borrar_la_de_un_aviso_apagado_no_pide_forzar(api):
+    await _llamar("POST", RUTA, json=NUEVA)
+    api.usos = {"promo": [{"tipo": "recordatorio", "activo": False}]}
+    assert (await _llamar("DELETE", f"{RUTA}/promo?confirmar=true")).status_code == 204
+
+
+# ------------------------------------------------------------
+# Texto que recibe el cliente (lo que queda en el hilo de la Bandeja)
+# ------------------------------------------------------------
+def test_texto_enviado_pone_los_valores():
+    comps = reglas.construir_componentes(
+        cuerpo="Hola {{1}}, tu cita es el {{2}}.", ejemplos_cuerpo=["Ana", "lunes"],
+        encabezado="Aviso para {{1}}", ejemplo_encabezado="Ana", pie="Gracias",
+        botones=[{"tipo": "QUICK_REPLY", "texto": "Ok"}],
+    )
+    assert reglas.texto_enviado(comps, ["Luis", "martes"], "Luis") == (
+        "Aviso para Luis\n\nHola Luis, tu cita es el martes.\n\nGracias"
+    )
+
+
+# ------------------------------------------------------------
+# Varias cuentas de WhatsApp Business (sql/81)
+# ------------------------------------------------------------
+from services import plantillas_cuentas as pc  # noqa: E402
+
+
+def _n(pnid, waba=None, principal=False, tel=None):
+    return pc.Numero(id=uuid4(), phone_number_id=pnid, telefono_visible=tel, es_principal=principal, waba_id=waba)
+
+
+def test_meta_agrupa_numeros_por_waba_y_marca_la_de_avisos():
+    cuentas, bloqueo, avisos = pc.agrupar("meta", [_n("1", "W1"), _n("2", "W2", principal=True), _n("3", "W1"), _n("4")])
+    assert [(c.clave, [n.phone_number_id for n in c.numeros]) for c in cuentas] == [("W1", ["1", "3"]), ("W2", ["2"])]
+    assert bloqueo is None and avisos == "W2"  # el número sin WABA resuelta queda fuera
+
+
+def test_neuroapi_es_una_cuenta_y_se_bloquea_con_wabas_distintas():
+    cuentas, bloqueo, avisos = pc.agrupar("neuroapi", [_n("1", "W1"), _n("2", None)])
+    assert len(cuentas) == 1 and cuentas[0].waba_cache is None and bloqueo is None and avisos == "unica"
+    _, bloqueo, _ = pc.agrupar("neuroapi", [_n("1", "W1"), _n("2", "W2")])
+    assert bloqueo == pc.BLOQUEO_NEUROAPI
+
+
+class _ServicioMeta:
+    llamadas: list[tuple] = []
+
+    def __init__(self, token, waba_id):
+        self.waba_id = waba_id
+
+    async def crear(self, **kw):
+        self.llamadas.append(("crear", self.waba_id, kw["nombre"]))
+        return {"id": "7", "status": "PENDING", "category": kw["categoria"]}
+
+    async def eliminar(self, nombre):
+        self.llamadas.append(("eliminar", self.waba_id, nombre))
+
+
+@pytest.fixture
+def dos_cuentas(api, monkeypatch):
+    _ServicioMeta.llamadas = []
+    monkeypatch.setattr("routers.plantillas_whatsapp_tenant.MetaTemplateService", _ServicioMeta)
+    api.cuentas = pc.Cuentas(
+        proveedor="meta", token="tok", clave_avisos="W1",
+        cuentas=[pc.Cuenta("W1", "W1", [_n("1", "W1", True, "+52 55")]), pc.Cuenta("W2", "W2", [_n("2", "W2", tel="+52 81")])],
+    )
+    return api
+
+
+async def test_mis_cuentas_lista_cada_waba_con_sus_numeros(dos_cuentas):
+    r = (await _llamar("GET", f"{RUTA}/mis-cuentas")).json()
+    assert r["proveedor"] == "meta" and r["bloqueo"] is None
+    assert [(c["clave"], c["de_avisos"], [n["telefono_visible"] for n in c["numeros"]]) for c in r["cuentas"]] == [
+        ("W1", True, ["+52 55"]), ("W2", False, ["+52 81"]),
+    ]
+
+
+async def test_con_varias_cuentas_escribir_pide_la_cuenta(dos_cuentas):
+    r = await _llamar("POST", RUTA, json=NUEVA)
+    assert r.status_code == 422 and r.json()["detail"]["codigo"] == "cuenta_requerida"
+    assert (await _llamar("POST", f"{RUTA}?cuenta=OTRA", json=NUEVA)).status_code == 404
+    assert _ServicioMeta.llamadas == []
+
+
+async def test_la_misma_plantilla_vive_aparte_en_cada_cuenta(dos_cuentas):
+    assert (await _llamar("POST", f"{RUTA}?cuenta=W2", json=NUEVA)).status_code == 201
+    assert (await _llamar("POST", f"{RUTA}?cuenta=W1", json=NUEVA)).status_code == 201  # otra WABA: no es duplicada
+    assert _ServicioMeta.llamadas == [("crear", "W2", "promo"), ("crear", "W1", "promo")]
+    w2 = (await _llamar("GET", f"{RUTA}?cuenta=W2")).json()
+    assert [(p["nombre"], p["cuenta"]) for p in w2] == [("promo", "W2")]
+    # Borrar en W2 no toca la de W1.
+    assert (await _llamar("DELETE", f"{RUTA}/promo?confirmar=true&cuenta=W2")).status_code == 204
+    assert _ServicioMeta.llamadas[-1] == ("eliminar", "W2", "promo")
+    assert [p["cuenta"] for p in (await _llamar("GET", RUTA)).json()] == ["W1"]
+
+
+async def test_en_uso_por_solo_en_la_cuenta_de_los_avisos(dos_cuentas):
+    await _llamar("POST", f"{RUTA}?cuenta=W1", json=NUEVA)
+    await _llamar("POST", f"{RUTA}?cuenta=W2", json=NUEVA)
+    dos_cuentas.usos = {"promo": [{"tipo": "recordatorio", "activo": True}]}
+    por_cuenta = {p["cuenta"]: p["en_uso_por"] for p in (await _llamar("GET", RUTA)).json()}
+    assert por_cuenta == {"W1": [{"tipo": "recordatorio", "activo": True}], "W2": []}
+    # En W2 no la usa ningún aviso: se borra sin forzar. En W1 sí lo pide.
+    assert (await _llamar("DELETE", f"{RUTA}/promo?confirmar=true&cuenta=W2")).status_code == 204
+    assert (await _llamar("DELETE", f"{RUTA}/promo?confirmar=true&cuenta=W1")).status_code == 409
+
+
+async def test_neuroapi_con_wabas_distintas_se_mira_pero_no_se_escribe(api):
+    api.cuentas = pc.Cuentas(proveedor="neuroapi", cuentas=[pc.Cuenta("unica", None)], bloqueo=pc.BLOQUEO_NEUROAPI)
+    assert (await _llamar("GET", RUTA)).status_code == 200
+    r = await _llamar("POST", RUTA, json=NUEVA)
+    assert r.status_code == 409 and r.json()["detail"]["codigo"] == pc.BLOQUEO_NEUROAPI
+    assert _Servicio.llamadas == []
+
+
+async def test_sin_whatsapp_escribir_es_502_como_antes(api):
+    api.cuentas = pc.Cuentas(proveedor=None, cuentas=[])
+    assert (await _llamar("POST", RUTA, json=NUEVA)).status_code == 502
+    assert (await _llamar("GET", RUTA)).status_code == 200
+
+
+async def test_resolver_pide_la_waba_a_graph_una_vez_y_la_guarda(monkeypatch):
+    guardadas, pedidas = [], []
+    filas = [
+        {"id": uuid4(), "phone_number_id": "PN1", "telefono_visible": "+52 55", "es_principal": True, "waba_id": "W1"},
+        {"id": uuid4(), "phone_number_id": "PN2", "telefono_visible": "+52 81", "es_principal": False, "waba_id": None},
+    ]
+
+    async def fetch_one(sql, *a):
+        return {"bsp_provider": "meta", "access_token": "tok", "phone_number_id": "PN1"}
+
+    async def fetch_all(sql, *a):
+        return filas
+
+    async def obtener_waba_id(pnid, token):
+        pedidas.append(pnid)
+        return "W2"
+
+    async def execute(sql, *a):
+        guardadas.append(a[1:])
+
+    monkeypatch.setattr(pc, "fetch_one", fetch_one)
+    monkeypatch.setattr(pc, "fetch_all", fetch_all)
+    monkeypatch.setattr(pc, "execute", execute)
+    monkeypatch.setattr(pc.meta, "obtener_waba_id", obtener_waba_id)
+    cuentas = await pc.resolver(TENANT)
+    assert pedidas == ["PN2"] and guardadas == [("PN2", "W2")]  # PN1 ya la tenía
+    assert [c.clave for c in cuentas.cuentas] == ["W1", "W2"] and cuentas.clave_avisos == "W1"

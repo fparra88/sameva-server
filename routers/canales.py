@@ -65,7 +65,7 @@ from schemas import (
     PausarNumeroOut,
 )
 from services import instagram_neuroapi, meta, neuroapi_connect
-from services import herramientas_plan
+from services import herramientas_plan, plantillas_cuentas
 from services import numeros_whatsapp as numeros
 from services.numeros_bitacora import Autor
 from services.numeros_reglas import configuracion_incompleta
@@ -486,6 +486,8 @@ async def activar_whatsapp_meta(
             bsp_provider="meta",
         )
         herramientas = await herramientas_plan.herramientas_de_numero(conn, tenant_id, fila["id"])
+    # La WABA la entrega el Embedded Signup: así sus plantillas se agrupan por cuenta (sql/81).
+    await plantillas_cuentas.guardar_waba(tenant_id, datos.phone_number_id, datos.waba_id)
     return _numero_out(fila, herramientas)
 
 

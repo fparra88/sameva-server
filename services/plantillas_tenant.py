@@ -15,7 +15,7 @@ from uuid import UUID
 from config import settings
 from services import plantillas_reglas as reglas
 from services import plantillas_whatsapp as _globales  # solo sus funciones puras de códigos de Meta
-from session import execute, fetch_all, fetch_one
+from session import execute, fetch_all, fetch_one, fetch_value
 
 log = logging.getLogger("operativai.plantillas_tenant")
 
@@ -29,6 +29,15 @@ ESTADO_POR_EVENTO = {
     "PENDING": "PENDING",
 }
 CAMPO_ESTADO = "message_template_status_update"
+
+# Cuenta (WABA) de una plantilla en la caché, sql/81. `None` = la cuenta única del negocio
+# (waba_id NULL: NeuroAPI siempre, y las filas de antes de sql/81). `TODAS` = sin filtrar.
+TODAS: Any = object()
+
+
+def _filtro_waba(waba_id: Any) -> tuple[bool, str | None]:
+    """(filtrar, valor) para `($n::bool IS FALSE OR waba_id IS NOT DISTINCT FROM $m)`."""
+    return (False, None) if waba_id is TODAS else (True, waba_id)
 
 # Spec 007: estados de Meta con los que una plantilla ya no sirve para avisar al cliente.
 ESTADOS_INUTILIZABLES = ("REJECTED", "PAUSED", "DISABLED")
@@ -240,13 +249,19 @@ async def marcar_estado_por_error(
     actualizar: FuncionActualizarEstado | None = None,
     apagar: FuncionApagar | None = None,
     alertar: FuncionAlertar | None = None,
+    waba_id: Any = TODAS,
 ) -> str | None:
     """
     El envío devolvió `plantilla_no_disponible`: Meta ya no acepta esa plantilla aunque
     la caché diga APPROVED. Marca la fila local (si existe) y aplica `reaccion_estado`.
-    Sin fila local no hace nada (no es plantilla de este negocio).
+    Sin fila local no hace nada (no es plantilla de este negocio). `waba_id` acota la
+    fila a la cuenta del número que envió (con varias WABAs el nombre puede repetirse).
     """
-    if not await (actualizar or _actualizar_estado_bd)(tenant_id, nombre, estado):
+    if actualizar is not None:
+        marcada = await actualizar(tenant_id, nombre, estado)
+    else:
+        marcada = await _actualizar_estado_bd(tenant_id, nombre, estado, waba_id=waba_id)
+    if not marcada:
         return None
     return await reaccion_estado(tenant_id, nombre, estado, apagar=apagar, alertar=alertar)
 
@@ -254,17 +269,21 @@ async def marcar_estado_por_error(
 # ------------------------------------------------------------
 # BD
 # ------------------------------------------------------------
-async def _actualizar_estado_bd(tenant_id: UUID, nombre: str, estado: str) -> bool:
+async def _actualizar_estado_bd(tenant_id: UUID, nombre: str, estado: str, *, waba_id: Any = TODAS) -> bool:
+    filtrar, waba = _filtro_waba(waba_id)
     fila = await fetch_one(
         """
         UPDATE plantillas_whatsapp_tenant
         SET estado = $3, actualizada_en = NOW()
         WHERE tenant_id = $1 AND nombre = $2
+          AND ($4::bool IS FALSE OR waba_id IS NOT DISTINCT FROM $5)
         RETURNING nombre
         """,
         tenant_id,
         nombre,
         estado,
+        filtrar,
+        waba,
     )
     return fila is not None
 
@@ -311,32 +330,71 @@ async def _alertar_bd(
 
 
 async def listar(
-    tenant_id: UUID, *, categoria: str | None = None, estado: str | None = None
+    tenant_id: UUID, *, categoria: str | None = None, estado: str | None = None, waba_id: Any = TODAS
 ) -> list[dict[str, Any]]:
+    filtrar, waba = _filtro_waba(waba_id)
     filas = await fetch_all(
         """
         SELECT * FROM plantillas_whatsapp_tenant
         WHERE tenant_id = $1
           AND ($2::text IS NULL OR categoria = $2)
           AND ($3::text IS NULL OR estado = $3)
+          AND ($4::bool IS FALSE OR waba_id IS NOT DISTINCT FROM $5)
         ORDER BY actualizada_en DESC, nombre
         """,
         tenant_id,
         categoria,
         estado,
+        filtrar,
+        waba,
     )
     return [dict(f) for f in filas]
 
 
-async def obtener(tenant_id: UUID, nombre: str) -> dict[str, Any] | None:
+def usos_de_config(fila: dict[str, Any] | None) -> dict[str, list[dict[str, Any]]]:
+    """
+    Pura. De la fila de `avisos_cita_config` del negocio, qué plantilla tiene asignada
+    cada aviso de cita: {nombre: [{"tipo": "recordatorio", "activo": True}, ...]}. Un
+    aviso apagado sigue apuntando a su plantilla (al encenderlo la usa), por eso también
+    cuenta; solo los activos bloquean el borrado (routers/plantillas_whatsapp_tenant.py).
+    """
+    usos: dict[str, list[dict[str, Any]]] = {}
+    if not fila:
+        return usos
+    for tipo in ("recordatorio", "cancelacion"):
+        nombre = fila.get(f"nombre_plantilla_{tipo}")
+        if nombre:
+            usos.setdefault(nombre, []).append({"tipo": tipo, "activo": bool(fila.get(f"{tipo}_activo"))})
+    return usos
+
+
+async def usos_en_avisos(tenant_id: UUID) -> dict[str, list[dict[str, Any]]]:
+    """`usos_de_config` con la fila real del negocio (sin fila = ningún uso)."""
+    fila = await fetch_one(
+        """
+        SELECT nombre_plantilla_recordatorio, recordatorio_activo,
+               nombre_plantilla_cancelacion, cancelacion_activo
+        FROM avisos_cita_config
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    return usos_de_config(dict(fila) if fila else None)
+
+
+async def obtener(tenant_id: UUID, nombre: str, *, waba_id: Any = TODAS) -> dict[str, Any] | None:
+    filtrar, waba = _filtro_waba(waba_id)
     fila = await fetch_one(
         """
         SELECT * FROM plantillas_whatsapp_tenant
         WHERE tenant_id = $1 AND nombre = $2
+          AND ($3::bool IS FALSE OR waba_id IS NOT DISTINCT FROM $4)
         ORDER BY actualizada_en DESC LIMIT 1
         """,
         tenant_id,
         nombre,
+        filtrar,
+        waba,
     )
     return dict(fila) if fila else None
 
@@ -344,15 +402,15 @@ async def obtener(tenant_id: UUID, nombre: str) -> dict[str, Any] | None:
 async def guardar(
     tenant_id: UUID, datos: dict[str, Any], *, creada_por: UUID | None = None, sincronizada: bool
 ) -> None:
-    """Inserta o actualiza por (tenant, nombre, idioma)."""
+    """Inserta o actualiza por (tenant, cuenta, nombre, idioma); `datos["waba_id"]` None = cuenta única."""
     await execute(
         """
         INSERT INTO plantillas_whatsapp_tenant
             (tenant_id, nombre, idioma, categoria, estado, motivo_rechazo, componentes,
-             meta_template_id, creada_por, sincronizada_en)
+             meta_template_id, creada_por, sincronizada_en, waba_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-                CASE WHEN $10 THEN NOW() END)
-        ON CONFLICT (tenant_id, nombre, idioma) DO UPDATE SET
+                CASE WHEN $10 THEN NOW() END, $11)
+        ON CONFLICT (tenant_id, (COALESCE(waba_id, '')), nombre, idioma) DO UPDATE SET
             categoria = EXCLUDED.categoria,
             estado = EXCLUDED.estado,
             motivo_rechazo = EXCLUDED.motivo_rechazo,
@@ -376,6 +434,19 @@ async def guardar(
         datos.get("meta_template_id"),
         creada_por,
         sincronizada,
+        datos.get("waba_id"),
+    )
+
+
+async def _sin_otra_con_ese_nombre(tenant_id: UUID, nombre: str) -> bool:
+    """
+    Los avisos de cita apuntan a su plantilla solo por nombre. Con varias WABAs, quitar
+    `nombre` de una cuenta no debe apagar el aviso si la plantilla sigue en otra.
+    """
+    return not await fetch_value(
+        "SELECT EXISTS (SELECT 1 FROM plantillas_whatsapp_tenant WHERE tenant_id = $1 AND nombre = $2)",
+        tenant_id,
+        nombre,
     )
 
 
@@ -386,37 +457,69 @@ async def sincronizar(
     lista_completa: bool,
     apagar: FuncionApagar | None = None,
     alertar: FuncionAlertar | None = None,
+    waba_id: str | None = None,
+    cuenta_unica: bool = True,
 ) -> int:
     """
-    Vuelca el catálogo de Meta en la caché. Con `lista_completa` (NeuroAPI devolvió
-    menos del límite pedido, o sea, todo) borra las filas locales que Meta ya no tiene
-    y, por cada una quitada, aplica `reaccion_estado(quitada=True)` (spec 007, RF-6).
+    Vuelca el catálogo de UNA cuenta (WABA) de Meta en la caché. `waba_id` None = la
+    cuenta única del negocio (NeuroAPI). Con `lista_completa` (Meta devolvió menos del
+    límite pedido, o sea, todo) borra las filas locales de esa cuenta que Meta ya no
+    tiene y, por cada una quitada, aplica `reaccion_estado(quitada=True)` (spec 007,
+    RF-6) si la plantilla no sigue en otra cuenta del negocio.
+
+    Filas de antes de sql/81 (waba_id NULL) de un negocio de Meta directo: las que
+    también vienen en esta cuenta se le asignan (para no duplicarlas); si el negocio
+    tiene una sola cuenta (`cuenta_unica`), todas son de ella y entran en el borrado.
     Devuelve cuántas plantillas quedaron sincronizadas.
     """
-    normalizadas = [n for n in (normalizar_meta(r) for r in remotas) if n]
+    normalizadas = [{**n, "waba_id": waba_id} for n in (normalizar_meta(r) for r in remotas) if n]
+    claves = [f"{n['nombre']}|{n['idioma']}" for n in normalizadas]
+    if waba_id is not None:
+        await execute(
+            """
+            UPDATE plantillas_whatsapp_tenant v SET waba_id = $2
+            WHERE v.tenant_id = $1 AND v.waba_id IS NULL
+              AND ($4::bool OR (v.nombre || '|' || v.idioma) = ANY($3::text[]))
+              AND NOT EXISTS (
+                  SELECT 1 FROM plantillas_whatsapp_tenant o
+                  WHERE o.tenant_id = v.tenant_id AND o.waba_id = $2
+                    AND o.nombre = v.nombre AND o.idioma = v.idioma)
+            """,
+            tenant_id,
+            waba_id,
+            claves,
+            cuenta_unica,
+        )
     for n in normalizadas:
         await guardar(tenant_id, n, sincronizada=True)
     if lista_completa:
-        claves = [f"{n['nombre']}|{n['idioma']}" for n in normalizadas]
         quitadas = await fetch_all(
             """
             DELETE FROM plantillas_whatsapp_tenant
-            WHERE tenant_id = $1 AND NOT ((nombre || '|' || idioma) = ANY($2::text[]))
+            WHERE tenant_id = $1 AND waba_id IS NOT DISTINCT FROM $3
+              AND NOT ((nombre || '|' || idioma) = ANY($2::text[]))
             RETURNING nombre
             """,
             tenant_id,
             claves,
+            waba_id,
         )
         for nombre in {f["nombre"] for f in quitadas}:
-            await reaccion_estado(tenant_id, nombre, None, quitada=True, apagar=apagar, alertar=alertar)
+            if await _sin_otra_con_ese_nombre(tenant_id, nombre):
+                await reaccion_estado(tenant_id, nombre, None, quitada=True, apagar=apagar, alertar=alertar)
     return len(normalizadas)
 
 
-async def borrar_local(tenant_id: UUID, nombre: str) -> None:
+async def borrar_local(tenant_id: UUID, nombre: str, *, waba_id: Any = TODAS) -> None:
+    """Meta borra por nombre (todos los idiomas) dentro de UNA cuenta: aquí igual."""
+    filtrar, waba = _filtro_waba(waba_id)
     await execute(
-        "DELETE FROM plantillas_whatsapp_tenant WHERE tenant_id = $1 AND nombre = $2",
+        "DELETE FROM plantillas_whatsapp_tenant WHERE tenant_id = $1 AND nombre = $2 "
+        "AND ($3::bool IS FALSE OR waba_id IS NOT DISTINCT FROM $4)",
         tenant_id,
         nombre,
+        filtrar,
+        waba,
     )
 
 
@@ -426,9 +529,20 @@ async def quitar(
     *,
     apagar: FuncionApagar | None = None,
     alertar: FuncionAlertar | None = None,
+    waba_id: Any = TODAS,
 ) -> str | None:
-    """Borra la fila de la caché y avisa a `reaccion_estado` (DELETE de la API). Devuelve el tipo apagado."""
-    await borrar_local(tenant_id, nombre)
+    """
+    Borra la fila de la caché (de la cuenta `waba_id`) y avisa a `reaccion_estado`
+    (DELETE de la API) si la plantilla ya no queda en ninguna cuenta del negocio.
+    Devuelve el tipo apagado.
+    """
+    if waba_id is TODAS:
+        await borrar_local(tenant_id, nombre)
+    else:
+        await borrar_local(tenant_id, nombre, waba_id=waba_id)
+        # Solo una WABA concreta (Meta directo) puede tener hermanas en otras cuentas.
+        if waba_id is not None and not await _sin_otra_con_ese_nombre(tenant_id, nombre):
+            return None
     return await reaccion_estado(tenant_id, nombre, None, quitada=True, apagar=apagar, alertar=alertar)
 
 

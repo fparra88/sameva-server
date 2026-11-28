@@ -224,7 +224,7 @@ async def test_quitar_borra_la_fila_apaga_y_alerta(monkeypatch: pytest.MonkeyPat
     f = _Funciones()
     borradas: list[str] = []
 
-    async def borrar_local(tenant_id: UUID, nombre: str) -> None:
+    async def borrar_local(tenant_id: UUID, nombre: str, **kw: Any) -> None:
         borradas.append(nombre)
 
     monkeypatch.setattr(cache, "borrar_local", borrar_local)
@@ -237,7 +237,7 @@ async def test_quitar_borra_la_fila_apaga_y_alerta(monkeypatch: pytest.MonkeyPat
 async def test_quitar_con_la_funcion_apagada_no_alerta(monkeypatch: pytest.MonkeyPatch) -> None:
     f = _Funciones(cancelacion=False)
 
-    async def borrar_local(tenant_id: UUID, nombre: str) -> None:
+    async def borrar_local(tenant_id: UUID, nombre: str, **kw: Any) -> None:
         return None
 
     monkeypatch.setattr(cache, "borrar_local", borrar_local)
@@ -255,12 +255,39 @@ async def test_sincronizar_completo_que_quita_filas_apaga_y_alerta(monkeypatch: 
         assert "DELETE" in sql and "RETURNING" in sql
         return [{"nombre": "recordatorio_cita"}]
 
+    async def fetch_value(sql: str, *a: Any) -> bool:
+        assert "EXISTS" in sql
+        return False  # ya no queda en ninguna cuenta del negocio
+
     monkeypatch.setattr(cache, "guardar", guardar)
     monkeypatch.setattr(cache, "fetch_all", fetch_all)
+    monkeypatch.setattr(cache, "fetch_value", fetch_value)
     n = await cache.sincronizar(T, [], lista_completa=True, apagar=f.apagar, alertar=f.alertar)
     assert n == 0
     assert f.config["recordatorio_activo"] is False and f.config["cancelacion_activo"] is True
     assert len(f.alertas) == 1 and "ya no está disponible" in f.alertas[0][2]
+
+
+async def test_sincronizar_de_una_cuenta_no_apaga_si_sigue_en_otra(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Varias WABAs (sql/81): quitarla de una cuenta no apaga el aviso si la otra la tiene."""
+    f = _Funciones()
+
+    async def nada(*a: Any, **k: Any) -> None:
+        return None
+
+    async def fetch_all(sql: str, *a: Any) -> list[dict[str, Any]]:
+        assert "waba_id IS NOT DISTINCT FROM" in sql  # el borrado es solo de esa cuenta
+        return [{"nombre": "recordatorio_cita"}]
+
+    async def fetch_value(sql: str, *a: Any) -> bool:
+        return True  # sigue en otra WABA del negocio
+
+    monkeypatch.setattr(cache, "guardar", nada)
+    monkeypatch.setattr(cache, "execute", nada)
+    monkeypatch.setattr(cache, "fetch_all", fetch_all)
+    monkeypatch.setattr(cache, "fetch_value", fetch_value)
+    await cache.sincronizar(T, [], lista_completa=True, apagar=f.apagar, alertar=f.alertar, waba_id="W2", cuenta_unica=False)
+    assert f.alertas == [] and f.config["recordatorio_activo"] is True
 
 
 async def test_sincronizar_parcial_no_borra_ni_reacciona(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -304,10 +331,10 @@ def api(monkeypatch: pytest.MonkeyPatch):
         "notificacion_cancelacion": {"nombre": "notificacion_cancelacion"},
     }
 
-    async def obtener(tenant_id: UUID, nombre: str):
+    async def obtener(tenant_id: UUID, nombre: str, **kw: Any):
         return filas.get(nombre)
 
-    async def borrar_local(tenant_id: UUID, nombre: str) -> None:
+    async def borrar_local(tenant_id: UUID, nombre: str, **kw: Any) -> None:
         filas.pop(nombre, None)
 
     async def listar(tenant_id: UUID, **kw: Any) -> list[dict[str, Any]]:
@@ -316,14 +343,23 @@ def api(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(cache, "obtener", obtener)
     monkeypatch.setattr(cache, "borrar_local", borrar_local)
     monkeypatch.setattr(cache, "listar", listar)
+
+    # en_uso_por / guarda de borrado: sin BD, ningún aviso la usa (el 409 de
+    # plantilla_en_uso se prueba en test_plantillas_tenant.py). Así estos tests
+    # siguen mirando solo `reaccion_estado`.
+    async def usos_en_avisos(tenant_id: UUID) -> dict[str, list[dict[str, Any]]]:
+        return {}
+
+    monkeypatch.setattr(cache, "usos_en_avisos", usos_en_avisos)
     monkeypatch.setattr("routers.plantillas_whatsapp_tenant.NeuroApiTemplateService", _Servicio)
 
-    # _servicio() mira bsp_provider antes de elegir entre NeuroAPI y Meta: sin
-    # BD real en estos tests, se fija en 'neuroapi' (ver test_plantillas_tenant.py).
-    async def _bsp_provider(*args: Any, **kwargs: Any) -> str:
-        return "neuroapi"
+    # Sin BD: una cuenta de NeuroAPI (ver test_plantillas_tenant.py).
+    from services import plantillas_cuentas as pc
 
-    monkeypatch.setattr("routers.plantillas_whatsapp_tenant.fetch_value", _bsp_provider)
+    async def resolver(tenant_id: UUID) -> Any:
+        return pc.Cuentas(proveedor="neuroapi", cuentas=[pc.Cuenta(clave="unica", waba_cache=None)])
+
+    monkeypatch.setattr("routers.plantillas_whatsapp_tenant.cuentas_svc.resolver", resolver)
 
     async def _u() -> UsuarioActual:
         return UsuarioActual(id=uuid4(), tenant_id=T, email="o@n.com", role="owner")

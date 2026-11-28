@@ -169,14 +169,26 @@ async def armar_turno(contexto: ContextoMensaje, nombre_modelo: str) -> str | li
     if not contexto.con_adjuntos:
         return contexto.contenido
 
+    # Cada salida sin media deja su motivo en el log (solo ids): son
+    # condiciones de configuración y, sin esto, lo único visible era que el
+    # agente decía que no podía ver la imagen.
     capacidades = modelo_mod.capacidades_de(nombre_modelo)
     if not capacidades.vision:
+        log.info(
+            "Conversación %s: adjuntos sin analizar, el modelo %s no está en la tabla de visión",
+            contexto.conversation_id, nombre_modelo,
+        )
         return contexto.contenido
     if not await plan_incluye(contexto.tenant_id):
+        log.info(
+            "Conversación %s: adjuntos sin analizar, el plan del tenant %s no incluye la familia '%s'",
+            contexto.conversation_id, contexto.tenant_id, FAMILIA,
+        )
         return contexto.contenido
 
     mensajes, adjuntos = await _cargar(contexto)
     if not adjuntos:
+        log.info("Conversación %s: con_adjuntos pero ninguno guardado de entrada", contexto.conversation_id)
         return contexto.contenido
 
     por_mensaje: dict[UUID, list[Adjunto]] = {}

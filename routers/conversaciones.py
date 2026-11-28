@@ -32,9 +32,11 @@ from schemas import (
     ConversacionOcultaOut,
     ConversacionOut,
     EnviarMensajeIn,
+    EnviarPlantillaIn,
     MensajeOut,
     LimpiarContextoOut,
     MetricasOut,
+    PlantillaTenantOut,
 )
 from config import settings
 from services import adjuntos
@@ -345,6 +347,44 @@ async def enviar_adjunto(
         enviado_por=usuario.email,
         adjuntos=[AdjuntoOut(**dict(adjunto))],
     )
+    await emit_mensaje(tenant_id, conversacion_id, mensaje.model_dump(mode="json"))
+    return mensaje
+
+
+@router.get("/{conversacion_id}/plantillas", response_model=list[PlantillaTenantOut])
+async def plantillas_de_conversacion(
+    conversacion_id: UUID,
+    tenant_id: UUID = Depends(tenant_actual),
+    _: None = Depends(conversacion_visible),
+):
+    """Plantillas aprobadas que se pueden mandar en esta conversación (vacío fuera de WhatsApp)."""
+    return [PlantillaTenantOut(**p) for p in await svc.plantillas_para_conversacion(tenant_id, conversacion_id)]
+
+
+@router.post(
+    "/{conversacion_id}/plantilla",
+    response_model=MensajeOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def enviar_plantilla(
+    conversacion_id: UUID,
+    datos: EnviarPlantillaIn,
+    usuario: UsuarioActual = Depends(usuario_actual),
+    tenant_id: UUID = Depends(tenant_actual),
+    _: None = Depends(conversacion_visible),
+    __: None = Depends(puede_operar),
+):
+    """
+    Plantilla APPROVED del negocio como respuesta manual por WhatsApp: lo
+    único que se puede mandar con la ventana de 24 h cerrada. Mismo permiso que
+    escribir (`puede_operar`). 404 plantilla ajena o inexistente, 409 no
+    aprobada / cliente de baja / no transferida, 422 faltan valores.
+    """
+    fila = await svc.enviar_plantilla_humano(
+        tenant_id, conversacion_id, datos.nombre, datos.valores_cuerpo,
+        datos.valor_encabezado, usuario.id,
+    )
+    mensaje = MensajeOut(**dict(fila), enviado_por=usuario.email)
     await emit_mensaje(tenant_id, conversacion_id, mensaje.model_dump(mode="json"))
     return mensaje
 

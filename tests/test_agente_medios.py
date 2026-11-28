@@ -64,6 +64,77 @@ async def test_lanza_solo_lo_que_se_puede_bajar(monkeypatch, mensaje, proveedor,
 
 
 # ============================================================
+# Espera de la ráfaga: los adjuntos de mensajes anteriores
+# ============================================================
+async def test_esperar_conversacion_espera_las_descargas_de_otros_mensajes(monkeypatch):
+    """Foto + "¿tienen esto?": la pasada del texto espera la descarga de la foto."""
+    import asyncio
+
+    liberar = asyncio.Event()
+    terminadas: list[str] = []
+
+    async def procesar(tenant_id, conversation_id, message_id, mensaje):
+        await liberar.wait()
+        terminadas.append(mensaje.media_id)
+        return True
+
+    monkeypatch.setattr(medios, "procesar", procesar)
+    conv = uuid4()
+    tarea = medios.lanzar(TENANT, conv, uuid4(), _mensaje(media_id="FOTO"), None)
+
+    espera = asyncio.create_task(medios.esperar_conversacion(conv))
+    await asyncio.sleep(0)
+    assert not espera.done()  # sigue esperando la foto
+
+    liberar.set()
+    await espera
+    assert terminadas == ["FOTO"]
+    await tarea
+    await asyncio.sleep(0)
+    assert conv not in medios._EN_CURSO  # se limpia sola al terminar
+
+
+async def test_esperar_conversacion_tiene_tope_y_no_cancela(monkeypatch):
+    import asyncio
+
+    liberar = asyncio.Event()
+
+    async def procesar(*a):
+        await liberar.wait()
+        return True
+
+    monkeypatch.setattr(medios, "procesar", procesar)
+    conv = uuid4()
+    tarea = medios.lanzar(TENANT, conv, uuid4(), _mensaje(), None)
+
+    await medios.esperar_conversacion(conv, timeout=0.01)
+    assert not tarea.done() and not tarea.cancelled()
+    liberar.set()
+    assert await tarea is True
+
+
+async def test_esperar_conversacion_sin_descargas_no_espera():
+    await medios.esperar_conversacion(uuid4(), timeout=0)
+
+
+async def test_esperar_conversacion_no_mezcla_conversaciones(monkeypatch):
+    import asyncio
+
+    liberar = asyncio.Event()
+
+    async def procesar(*a):
+        await liberar.wait()
+        return True
+
+    monkeypatch.setattr(medios, "procesar", procesar)
+    tarea = medios.lanzar(TENANT, uuid4(), uuid4(), _mensaje(), None)
+    # Otra conversación no espera la descarga ajena.
+    await asyncio.wait_for(medios.esperar_conversacion(uuid4()), timeout=0.5)
+    liberar.set()
+    await tarea
+
+
+# ============================================================
 # Procesar
 # ============================================================
 @pytest.fixture

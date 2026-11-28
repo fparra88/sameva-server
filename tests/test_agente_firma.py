@@ -262,3 +262,45 @@ async def test_widget_sin_dominios_registrados_se_rechaza(monkeypatch):
     monkeypatch.setattr(firma, "fetch_one", _canal_widget(""))
     with pytest.raises(firma.FirmaInvalida):
         await firma.verificar_widget(CUERPO_WIDGET, {"origin": "https://cliente.com"})
+
+
+# ============================================================
+# 3b. Estado de plantillas por Meta directo (sin phone_number_id)
+# ============================================================
+def cuerpo_plantilla(waba: str = "WABA-1") -> bytes:
+    return json.dumps({
+        "object": "whatsapp_business_account",
+        "entry": [{"id": waba, "time": 1, "changes": [{
+            "field": "message_template_status_update",
+            "value": {"event": "APPROVED", "message_template_id": 9, "message_template_name": "promo",
+                      "message_template_language": "es_MX", "reason": "NONE"},
+        }]}],
+    }).encode()
+
+
+def test_un_estado_de_plantilla_se_identifica_por_su_waba():
+    assert firma.identificar_remitente(json.loads(cuerpo_plantilla())) == (firma.CANAL_WABA, "WABA-1")
+    # Un mensaje sigue identificándose por el número, aunque venga de la misma WABA.
+    assert firma.identificar_remitente(json.loads(cuerpo_whatsapp())) == ("whatsapp", "PNID-1")
+
+
+async def test_firma_de_un_estado_de_plantilla_usa_el_secreto_de_la_waba(monkeypatch):
+    pedidos = []
+
+    async def fake_fetch_value(sql, *args):
+        pedidos.append((sql, args))
+        return SECRETO_APP
+
+    monkeypatch.setattr(firma, "fetch_value", fake_fetch_value)
+    cuerpo = cuerpo_plantilla()
+    resultado = await firma.verificar_firma_meta(cuerpo, {"x-hub-signature-256": firmar(cuerpo)})
+    assert resultado["entry"][0]["id"] == "WABA-1"
+    sql, args = pedidos[0]
+    assert "agentes_canal" in sql and "waba_id" in sql and args == ("WABA-1",)
+
+
+async def test_estado_de_plantilla_de_una_waba_ajena_se_rechaza(monkeypatch):
+    monkeypatch.setattr(firma, "fetch_value", _secreto_fijo(None))
+    cuerpo = cuerpo_plantilla("WABA-DE-OTRO")
+    with pytest.raises(firma.FirmaInvalida):
+        await firma.verificar_firma_meta(cuerpo, {"x-hub-signature-256": firmar(cuerpo)})

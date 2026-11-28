@@ -166,6 +166,38 @@ def numero_de_variables(componentes: list[dict[str, Any]]) -> int:
     return max(numeros) if numeros else 0
 
 
+def _sustituir(texto: str, valores: list[str]) -> str:
+    def cambio(m: re.Match[str]) -> str:
+        n = int(m.group(1))
+        return valores[n - 1].strip() if 0 < n <= len(valores) else m.group(0)
+
+    return VARIABLE_RE.sub(cambio, texto)
+
+
+def texto_enviado(
+    componentes: list[dict[str, Any]],
+    valores_cuerpo: list[str],
+    valor_encabezado: str | None = None,
+) -> str:
+    """
+    Lo que lee el cliente: encabezado, cuerpo y pie con los valores puestos.
+    Es lo que queda en `messages.content` al mandar una plantilla desde la
+    Bandeja, para que el hilo (y el agente, si la conversación vuelve a la IA)
+    vea lo mismo que recibió el cliente. Los botones no se incluyen.
+    """
+    partes: list[str] = []
+    encabezado = texto_de(componentes, "HEADER")
+    if encabezado:
+        partes.append(_sustituir(encabezado, [valor_encabezado or ""]))
+    cuerpo = texto_de(componentes, "BODY")
+    if cuerpo:
+        partes.append(_sustituir(cuerpo, valores_cuerpo))
+    pie = texto_de(componentes, "FOOTER")
+    if pie:
+        partes.append(pie)
+    return "\n\n".join(p.strip() for p in partes if p.strip())
+
+
 def parametros_de_envio(
     componentes: list[dict[str, Any]],
     valores_cuerpo: list[str],
