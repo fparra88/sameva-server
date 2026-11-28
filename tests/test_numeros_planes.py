@@ -19,7 +19,8 @@ from services.acceso_plan import cupo_numeros
 from services.limites_agente import MODELOS_AGENTE, limites_de_tenant
 from session import execute, fetch_one
 
-HAIKU, SONNET, OPUS = MODELOS_AGENTE
+HAIKU, SONNET, OPUS = "claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5"
+assert {HAIKU, SONNET, OPUS} <= set(MODELOS_AGENTE)
 
 
 @pytest.fixture

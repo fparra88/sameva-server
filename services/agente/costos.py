@@ -23,8 +23,9 @@ Un modelo que no esté en la tabla devuelve None, NO cero. Un cero diría "esto
 fue gratis" y se sumaría en los informes como si lo fuera; un NULL dice "no sé
 qué costó", que es la verdad y se ve en cuanto alguien mire la columna.
 
-Precios de la tabla pública de Anthropic (consultados el 16/10/2026). Si
-cambian, se cambian acá: `tenant_token_usage` guarda el importe ya calculado,
+Precios de la tabla pública de Anthropic (revisados el 27/11/2026: Sonnet 5
+estaba a 3/15 y su tarifa es 2/10; se suman los modelos 5.5). Si cambian, se
+cambian acá: `tenant_token_usage` guarda el importe ya calculado,
 así que los movimientos pasados quedan con el precio que estaba vigente
 cuando se registraron, que es lo que se quiere para auditar.
 """
@@ -53,10 +54,22 @@ MULT_CACHE_ESCRITURA = Decimal("1.25")
 
 @dataclass(frozen=True)
 class Tarifa:
-    """USD por millón de tokens."""
+    """
+    USD por millón de tokens.
+
+    `cache_lectura` solo se da cuando el precio publicado NO es 0,1x la
+    entrada: en Sonnet 5.5 la lectura cuesta 0,10 sobre una entrada de 2
+    (0,05x) y en Opus 5.5, 0,20 sobre 4. Sin ella se usa MULT_CACHE_LECTURA.
+    """
 
     entrada: Decimal
     salida: Decimal
+    cache_lectura: Decimal | None = None
+
+    def precio_cache_lectura(self) -> Decimal:
+        if self.cache_lectura is not None:
+            return self.cache_lectura
+        return self.entrada * MULT_CACHE_LECTURA
 
 
 # Solo los modelos que pueden aparecer en `tenant_agent_config.model`: los tres
@@ -65,8 +78,13 @@ class Tarifa:
 # acepta cualquier texto.
 _TARIFAS: dict[str, Tarifa] = {
     # Catálogo actual
+    "claude-opus-5-5": Tarifa(Decimal(4), Decimal(20), cache_lectura=Decimal("0.20")),
+    "claude-sonnet-5-5": Tarifa(Decimal(2), Decimal(10), cache_lectura=Decimal("0.10")),
+    # Hasta 100K tokens de prompt; por encima pasa a 0,50/2,50. Un turno del
+    # agente queda muy lejos de eso (historial acotado por `history_window`).
+    "claude-haiku-5-5": Tarifa(Decimal("0.10"), Decimal("0.50")),
     "claude-opus-5": Tarifa(Decimal(5), Decimal(25)),
-    "claude-sonnet-5": Tarifa(Decimal(3), Decimal(15)),
+    "claude-sonnet-5": Tarifa(Decimal(2), Decimal(10)),
     "claude-haiku-4-5": Tarifa(Decimal(1), Decimal(5)),
     # Generaciones anteriores, por si una fila vieja las conserva
     "claude-opus-4-8": Tarifa(Decimal(5), Decimal(25)),
@@ -124,12 +142,9 @@ def calcular_costo(
     if tarifa is None:
         return None
 
-    unidades_entrada = (
-        Decimal(entrada)
-        + Decimal(cache_lectura) * MULT_CACHE_LECTURA
-        + Decimal(cache_escritura) * MULT_CACHE_ESCRITURA
-    )
     total = (
-        unidades_entrada * tarifa.entrada + Decimal(salida) * tarifa.salida
+        (Decimal(entrada) + Decimal(cache_escritura) * MULT_CACHE_ESCRITURA) * tarifa.entrada
+        + Decimal(cache_lectura) * tarifa.precio_cache_lectura()
+        + Decimal(salida) * tarifa.salida
     ) / POR_MILLON
     return total.quantize(Decimal("0.000001"))

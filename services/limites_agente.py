@@ -37,9 +37,16 @@ from session import fetch_one
 # Es la única lista: agente.py, la validación de planes y el panel la leen de
 # acá. Un modelo nuevo se suma aquí y en services/agente/modelo.py, que decide
 # qué parámetros admite (no todas las generaciones aceptan los mismos).
+#
+# Los de la generación 5.5 van delante de su predecesor en cada familia
+# (cuestan igual o menos), pero ningún plan los trae: entran cuando gerencia
+# los marca en /gerencia/planes. Los planes sin lista (enterprise) los ven ya.
 MODELOS_AGENTE: tuple[str, ...] = (
+    "claude-haiku-5-5",
     "claude-haiku-4-5-20251001",
+    "claude-sonnet-5-5",
     "claude-sonnet-5",
+    "claude-opus-5-5",
     "claude-opus-5",
 )
 

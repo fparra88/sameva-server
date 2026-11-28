@@ -6,17 +6,40 @@ from decimal import Decimal
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, EmailStr, Field, field_validator, model_validator
 
 from services.limites_agente import HISTORIAL_MAX, HISTORIAL_MIN, MODELOS_AGENTE, ordenar_modelos
+from services.politica_password import MAXIMO as PASSWORD_MAX
+from services.politica_password import validar_password_nueva
 
 
 # ============================================================
 # AUTH
 # ============================================================
-class RegistroIn(BaseModel):
+# Contraseña que se elige ahora (registro, invitación, restablecer): 8+
+# caracteres con letra, número y un símbolo de @#$%.: (services/politica_password.py).
+# El login NO la usa: las contraseñas ya registradas siguen valiendo.
+PasswordNueva = Annotated[str, Field(max_length=PASSWORD_MAX), AfterValidator(validar_password_nueva)]
+
+
+class _ConfirmaPassword(BaseModel):
+    """
+    `password_confirmacion` es opcional porque hay clientes (app) que todavía
+    no lo mandan; el portal siempre lo manda. Si llega y no coincide es un 422
+    y no se guarda nada (ni el alta pendiente ni la cuenta).
+    """
+    password_confirmacion: str | None = Field(default=None, max_length=PASSWORD_MAX)
+
+    @model_validator(mode="after")
+    def _coinciden(self):
+        if self.password_confirmacion is not None and self.password_confirmacion != self.password:
+            raise ValueError("Las contraseñas no coinciden")
+        return self
+
+
+class RegistroIn(_ConfirmaPassword):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    password: PasswordNueva
     full_name: str | None = None
     nombre_negocio: str = Field(min_length=2, max_length=255)
     # Obligatorio y sin valor por defecto: ausente o false es un 422 y no se
@@ -67,14 +90,13 @@ class RecuperacionSolicitadaOut(BaseModel):
     reenviar_en_segundos: int
 
 
-class RestablecerPasswordIn(BaseModel):
+class RestablecerPasswordIn(_ConfirmaPassword):
     """Body de POST /auth/recuperar/restablecer."""
     email: EmailStr
     # Exactamente 6 dígitos: se valida acá para no gastar un argon2 por
     # cada cadena cualquiera que llegue.
     codigo: str = Field(pattern=r"^\d{6}$")
-    # Misma regla que RegistroIn.password.
-    password: str = Field(min_length=8, max_length=128)
+    password: PasswordNueva
 
 
 # ============================================================
@@ -723,6 +745,9 @@ class AsignacionConversacionOut(BaseModel):
 
 class ConversacionOut(AsignacionConversacionOut):
     id: UUID
+    # El agente la delegó y nadie del equipo ha escrito desde entonces
+    # (conversaciones.NECESITA_HUMANO_SQL). La gerencia no lo arma: False.
+    necesita_humano: bool = False
     # El contacto (users.id): llave del lead en el embudo (/pipeline/{user_id}).
     # Opcional: la vista de gerencia arma estos modelos sin él.
     user_id: UUID | None = None
@@ -817,6 +842,9 @@ class AsignableOut(BaseModel):
 
 class ConversacionDetalleOut(AsignacionConversacionOut):
     id: UUID
+    # El agente la delegó y nadie del equipo ha escrito desde entonces
+    # (conversaciones.NECESITA_HUMANO_SQL). La gerencia no lo arma: False.
+    necesita_humano: bool = False
     # El contacto (users.id): llave del lead en el embudo (/pipeline/{user_id}).
     # Opcional: la vista de gerencia arma estos modelos sin él.
     user_id: UUID | None = None
@@ -3319,8 +3347,8 @@ class InvitacionInfoOut(BaseModel):
     expira_en: datetime
 
 
-class AceptarInvitacionIn(InvitacionTokenIn):
-    password: str = Field(min_length=8, max_length=128)
+class AceptarInvitacionIn(_ConfirmaPassword, InvitacionTokenIn):
+    password: PasswordNueva
     # Mismo criterio que RegistroIn: sin aceptación no se crea la cuenta.
     acepta_terminos: Annotated[bool, Field(strict=True)]
 

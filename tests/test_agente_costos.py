@@ -43,7 +43,7 @@ def test_entrada_simple_por_modelo():
         "0.001000"
     )
     assert costos.calcular_costo("claude-sonnet-5", entrada=1000, salida=0) == Decimal(
-        "0.003000"
+        "0.002000"
     )
     assert costos.calcular_costo("claude-opus-5", entrada=1000, salida=0) == Decimal(
         "0.005000"
@@ -91,6 +91,43 @@ def test_sumar_la_entrada_antes_de_cobrarla_infla_la_factura():
     assert real == Decimal("0.002400")
     assert como_si_todo_fuera_entrada_plena == Decimal("0.006000")
     assert como_si_todo_fuera_entrada_plena > real * 2
+
+
+def test_generacion_5_5():
+    """Mil tokens de entrada y mil de salida en los tres modelos 5.5."""
+    assert costos.calcular_costo("claude-haiku-5-5", entrada=1000, salida=1000) == Decimal(
+        "0.000600"
+    )
+    assert costos.calcular_costo("claude-sonnet-5-5", entrada=1000, salida=1000) == Decimal(
+        "0.012000"
+    )
+    assert costos.calcular_costo("claude-opus-5-5", entrada=1000, salida=1000) == Decimal(
+        "0.024000"
+    )
+
+
+def test_la_lectura_de_cache_usa_su_tarifa_publicada_si_la_hay():
+    """
+    Sonnet 5.5 publica 0,10 por millón leído de caché (0,05x su entrada), no
+    0,1x. Haiku 5.5 no publica una propia y cae en el 0,1x general.
+    """
+    assert costos.calcular_costo(
+        "claude-sonnet-5-5", entrada=0, salida=0, cache_lectura=1_000_000
+    ) == Decimal("0.100000")
+    assert costos.calcular_costo(
+        "claude-opus-5-5", entrada=0, salida=0, cache_lectura=1_000_000
+    ) == Decimal("0.200000")
+    assert costos.calcular_costo(
+        "claude-haiku-5-5", entrada=0, salida=0, cache_lectura=1_000_000
+    ) == Decimal("0.010000")
+
+
+def test_un_5_5_no_cobra_como_su_predecesor():
+    """`claude-opus-5-5` empieza por `claude-opus-5`: el prefijo largo gana."""
+    assert costos.tarifa_de("claude-opus-5-5") != costos.tarifa_de("claude-opus-5")
+    assert costos.tarifa_de("claude-sonnet-5-5-20261101") == costos.tarifa_de(
+        "claude-sonnet-5-5"
+    )
 
 
 @pytest.mark.parametrize(
@@ -219,7 +256,7 @@ async def test_se_registra_el_costo_en_dolares(contexto, registrado):
     exigir_llamada(registrado)
     assert registrado["tenant_id"] == TENANT
     # 1000 de entrada + 4000 leídos de caché, 200 de salida, en Sonnet 5.
-    assert registrado["costo_usd"] == Decimal("0.007200")
+    assert registrado["costo_usd"] == Decimal("0.004800")
     # El volumen sí va sumado: es lo que mide la columna de tokens.
     assert registrado["tokens_entrada"] == 5000
     assert registrado["tokens_salida"] == 200
@@ -229,7 +266,7 @@ async def test_el_volumen_va_sumado_pero_el_precio_no(contexto, registrado):
     """
     Las dos columnas dicen cosas distintas a propósito: `tokens_entrada` es
     volumen procesado y `costo_usd` es dinero. Si el coste se hubiera
-    calculado sobre el volumen, saldría 0,021 en vez de 0,0072.
+    calculado sobre el volumen, saldría 0,012 en vez de 0,0048.
     """
     await loop_agente._registrar_consumo(contexto, respuesta_con_consumo())
 

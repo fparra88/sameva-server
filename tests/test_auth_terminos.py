@@ -29,7 +29,7 @@ from config import settings
 from security import hash_password
 from session import execute, fetch_one, fetch_value
 
-PASSWORD = "una-clave-segura"
+PASSWORD = "una-clave.segura1"
 
 
 # ============================================================
@@ -380,3 +380,21 @@ async def test_login_de_una_cuenta_ya_aceptada_no_cambia(http_client, limpieza):
     usuario = await _usuario(email)
     assert usuario["terminos_aceptados_en"] == antes
     assert usuario["terminos_version"] == "2026-01-15"
+
+
+@pytest.mark.asyncio
+async def test_login_con_contrasena_a_una_cuenta_de_google_da_401_y_no_500(
+    http_client, limpieza
+):
+    """
+    Las cuentas creadas con Google no tienen `password_hash` (sql/13). Antes
+    `verify_password(..., None)` reventaba con AttributeError y el login
+    devolvía 500; tiene que ser el mismo 401 que una contraseña errada.
+    """
+    email = await _cuenta_existente(limpieza, aceptada=True, google_id="g-sin-clave")
+    await execute("UPDATE portal_users SET password_hash = NULL WHERE email = $1", email)
+
+    r = await http_client.post("/api/auth/login", json={"email": email, "password": PASSWORD})
+
+    assert r.status_code == 401
+    assert r.json()["detail"] == "Correo o contraseña incorrectos"

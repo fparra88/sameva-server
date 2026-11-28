@@ -62,7 +62,7 @@ async def _invitar(http_client, dueno, **cuerpo):
     return await http_client.post("/api/equipo/invitaciones", json=cuerpo, headers=_h(dueno["token"]))
 
 
-async def _aceptar(http_client, token, password="clave-segura-1", acepta=True):
+async def _aceptar(http_client, token, password="clave-segura.1", acepta=True):
     return await http_client.post(
         "/api/auth/invitacion/aceptar",
         json={"token": token, "password": password, "acepta_terminos": acepta},
@@ -105,7 +105,7 @@ async def test_invitar_y_aceptar_member(http_client, dueno):
     assert pendientes.json() == []
 
     # Entra con la contraseña que eligió, no con una que puso el dueño.
-    login = await http_client.post("/api/auth/login", json={"email": email, "password": "clave-segura-1"})
+    login = await http_client.post("/api/auth/login", json={"email": email, "password": "clave-segura.1"})
     assert login.status_code == 200
 
 

@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
-from services.agente import loop_agente
+from services.agente import escalar, loop_agente
 from services.agente.modelos import ContextoMensaje
 from services.agente.prompt import ZONA_POR_DEFECTO
 from session import execute, fetch_one
@@ -178,8 +178,14 @@ async def probar(
             "No se pudo obtener respuesta del modelo. Inténtalo de nuevo en un momento."
         )
 
+    texto = respuesta.texto
+    if respuesta.transferida:
+        # Lo que recibiría el cliente: el aviso fijo, no el texto del modelo.
+        # Solo se arma el texto; no se guarda ni se envía nada.
+        texto = escalar.texto_delegacion(await escalar.nombre_negocio(tenant_id))
+
     return ResultadoPrueba(
-        texto=respuesta.texto,
+        texto=texto,
         modelo=respuesta.modelo,
         transferida=respuesta.transferida,
         herramientas=respuesta.herramientas,

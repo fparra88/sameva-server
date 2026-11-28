@@ -32,7 +32,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from config import settings
-from services.agente import envio, firma, ingreso, loop_agente
+from services.agente import envio, escalar, firma, ingreso, loop_agente
 from services.agente import normalizar as normalizar_mod
 from services.agente.modelos import (
     ContextoMensaje,
@@ -250,10 +250,17 @@ async def _resolver_respuesta(resultado: ResultadoIngreso) -> str | None:
     if respuesta.bloqueada_por_limite:
         return None
 
-    # Si el agente transfirió, el bot calla: el acuse es un texto fijo que
-    # manda `ingreso` con el siguiente mensaje del cliente.
+    # Si el agente transfirió, el cliente recibe el aviso fijo de delegación
+    # (no el texto que el modelo haya escrito junto a la herramienta: serían
+    # dos mensajes) y a partir de acá el bot calla. Sale aunque el aviso al
+    # portal haya fallado: la conversación quedó transferida y en la bandeja
+    # aparece como «Necesita atención de humano».
     if respuesta.transferida:
-        return None
+        texto = await escalar.notificar_delegacion(
+            tenant_id=contexto.tenant_id, conversation_id=contexto.conversation_id
+        )
+        await _entregar(contexto.destino, texto)
+        return texto
 
     # Mientras el modelo pensaba, una persona pudo contestar desde la app
     # móvil (eco de coexistencia) o tomar la conversación en el portal: si la

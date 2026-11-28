@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import jwt
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError, VerificationError
+from argon2.exceptions import InvalidHashError, VerifyMismatchError, VerificationError
 
 from config import settings
 
@@ -23,11 +23,22 @@ def hash_password(plain: str) -> str:
     return _hasher.hash(plain)
 
 
-def verify_password(plain: str, hashed: str) -> bool:
+def verify_password(plain: str, hashed: str | None) -> bool:
+    """
+    False (nunca una excepción) si no coincide o si no hay hash válido.
+
+    `portal_users.password_hash` es NULL en las cuentas creadas con Google
+    (sql/13): entrar a una de ellas con correo y contraseña tiene que dar el
+    mismo 401 que una contraseña errada, no un 500. Sin hash se calcula uno
+    igual para que el tiempo de respuesta no delate qué cuentas son de Google.
+    """
+    if not hashed:
+        _hasher.hash(plain or "")
+        return False
     try:
         _hasher.verify(hashed, plain)
         return True
-    except (VerifyMismatchError, VerificationError):
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
 
 

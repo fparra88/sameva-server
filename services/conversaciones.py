@@ -57,6 +57,22 @@ _MINUTOS_VENTANA = (
     f"ELSE (1440 - EXTRACT(EPOCH FROM (NOW() - {_ULTIMO_CLIENTE})) / 60)::int END"
 )
 
+# «Necesita atención de humano» en la bandeja: el AGENTE la delegó
+# (`escalar_humano` deja `escalado_por_agente`; tomar o asignar desde el
+# portal no) y nadie del equipo ha escrito desde entonces. Se apaga solo en
+# cuanto entra un mensaje role='human' o la conversación vuelve a la IA. No es
+# un estado guardado: no hay que limpiarlo en ningún sitio.
+# `escalado_en` se guardó como NOW()::text (con huso); se pasa a timestamp sin
+# huso en la zona de la sesión, igual que el DEFAULT NOW() de messages.created_at.
+NECESITA_HUMANO_SQL = (
+    "(c.status = 'transferred' "
+    "AND COALESCE((c.metadata->>'escalado_por_agente')::boolean, false) "
+    "AND c.metadata ? 'escalado_en' "
+    "AND NOT EXISTS (SELECT 1 FROM messages mh WHERE mh.conversation_id = c.id "
+    "AND mh.role = 'human' "
+    "AND mh.created_at >= (c.metadata->>'escalado_en')::timestamptz::timestamp))"
+)
+
 # Instagram por NeuroAPI: la respuesta de una persona sale con la etiqueta
 # HUMAN_AGENT (services/mensajeria.py), que Meta acepta hasta 7 días después
 # del último mensaje del cliente. Solo si el canal del negocio está vinculado
@@ -242,8 +258,10 @@ async def listar(
     asignada: str | None = None,
     yo: UUID | None = None,
     numero_id: UUID | None = None,
+    necesita_humano: bool = False,
 ):
     """
+    `necesita_humano`: solo las que el agente delegó y nadie atendió aún.
     Con `alcance` (rol acotado), solo lo suyo (_visible_acotado).
     `asignada`: 'mias' (requiere `yo`), 'sin_asignar' o el uuid (texto) de
     una persona; None = sin filtro.
@@ -275,6 +293,7 @@ async def listar(
              ORDER BY m.created_at DESC LIMIT 1) AS ultimo_mensaje,
             {_ULTIMO_CLIENTE} AS ultimo_mensaje_cliente_at,
             {_MINUTOS_VENTANA} AS minutos_restantes_ventana,
+            {NECESITA_HUMANO_SQL} AS necesita_humano,
             {_NUMERO_CAMPOS}
         FROM conversations c
         JOIN users u ON u.id = c.user_id
@@ -298,6 +317,7 @@ async def listar(
             OR ($10 = 'mias' AND c.asignado_a = $11::uuid)
             OR ($10 NOT IN ('sin_asignar', 'mias') AND c.asignado_a::text = $10)
           )
+          AND (NOT $13::boolean OR {NECESITA_HUMANO_SQL})
         ORDER BY c.last_message_at DESC
         LIMIT $5 OFFSET $6
         """,
@@ -313,6 +333,7 @@ async def listar(
         asignada,
         yo,
         numero_id,
+        necesita_humano,
     )
 
 
@@ -365,6 +386,7 @@ async def detalle(tenant_id: UUID, conversacion_id: UUID):
             {_ULTIMO_CLIENTE} AS ultimo_mensaje_cliente_at,
             {_MINUTOS_VENTANA} AS minutos_restantes_ventana,
             {_MINUTOS_VENTANA_HUMANA} AS minutos_restantes_ventana_humana,
+            {NECESITA_HUMANO_SQL} AS necesita_humano,
             {_NUMERO_CAMPOS}
         FROM conversations c
         JOIN users u ON u.id = c.user_id

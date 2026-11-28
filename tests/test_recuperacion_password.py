@@ -21,7 +21,7 @@ from session import execute, fetch_one
 
 SOLICITAR = "/api/auth/recuperar/solicitar"
 RESTABLECER = "/api/auth/recuperar/restablecer"
-NUEVA = "nueva-clave-segura"
+NUEVA = "nueva-clave.segura1"
 ERROR_GENERICO = "El código es incorrecto o ya venció. Solicita uno nuevo."
 
 
@@ -200,7 +200,7 @@ async def test_cambia_la_contraseña_y_el_codigo_se_invalida(http_client, cuenta
     assert await _fila(cuenta["usuario_id"]) is None
 
     # Un solo uso: el mismo código ya no sirve, ni para otra contraseña.
-    segundo = await _restablecer(http_client, cuenta["email"], codigo, "otra-clave-distinta")
+    segundo = await _restablecer(http_client, cuenta["email"], codigo, "otra-clave.distinta1")
     assert segundo.status_code == 400
 
     assert (await _login(http_client, cuenta["email"], NUEVA)).status_code == 200

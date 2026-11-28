@@ -144,7 +144,7 @@ async def test_invitar_proveedor_liga_su_ficha(http_client, agenda):
 
     r = await http_client.post(
         "/api/auth/invitacion/aceptar",
-        json={"token": token, "password": "clave-segura-1", "acepta_terminos": True},
+        json={"token": token, "password": "clave-segura.1", "acepta_terminos": True},
     )
     assert r.status_code == 201, r.text
     sesion = _h(r.json()["access_token"])

@@ -171,6 +171,7 @@ async def listar(
     buscar: str | None = Query(None, max_length=100),
     asignada: str | None = Query(None, max_length=36),
     numero_id: UUID | None = Query(None),
+    necesita_humano: bool = Query(False),
     limite: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     usuario: UsuarioActual = Depends(usuario_actual),
@@ -193,6 +194,7 @@ async def listar(
         asignada=_filtro_asignada(asignada),
         yo=usuario.id,
         numero_id=numero_id,
+        necesita_humano=necesita_humano,
     )
     return [ConversacionOut(**dict(f)) for f in filas]
 

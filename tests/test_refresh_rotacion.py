@@ -217,7 +217,7 @@ async def test_restablecer_password_borra_las_sesiones(http_client, cuenta, monk
     codigo = enviados[0][1]
     r = await http_client.post(
         "/api/auth/recuperar/restablecer",
-        json={"email": cuenta["email"], "codigo": codigo, "password": "otra-clave-nueva"},
+        json={"email": cuenta["email"], "codigo": codigo, "password": "otra-clave.nueva1"},
     )
     assert r.status_code == 204
 

@@ -1,8 +1,8 @@
 """
 Qué parámetros acepta cada modelo del catálogo.
 
-`services/limites_agente.MODELOS_AGENTE` abarca tres generaciones de la API de
-Anthropic, y no aceptan la misma petición. Mandar un parámetro que el modelo
+`services/limites_agente.MODELOS_AGENTE` abarca varias generaciones de la API
+de Anthropic (4.5, 5 y 5.5), y no aceptan la misma petición. Mandar un parámetro que el modelo
 ya no admite no se degrada: devuelve 400 y el cliente se queda sin respuesta.
 
     claude-opus-5     piensa por defecto · acepta `effort` · RECHAZA temperature
@@ -51,7 +51,15 @@ class Capacidades:
 # Lo que no esté acá se trata como desconocido (todo en False): la petición
 # mínima es la única que se puede dar por válida sin haberlo comprobado.
 _CAPACIDADES: dict[str, Capacidades] = {
-    "claude-opus-5": Capacidades(thinking_adaptativo=True, effort=True, vision=True, pdf=True),
+    # Generación 5.5: piensan siempre (en Opus 5.5 y Sonnet 5.5 mandar
+    # `thinking: disabled` da 400, por eso nunca se manda `thinking`) y su
+    # `effort` por defecto cambia (`medium` en Opus 5.5 y Haiku 5.5), así que
+    # se manda siempre explícito. Tampoco aceptan `tool_choice` forzado
+    # (`any`/`tool`); el bucle usa `auto`. Cachean desde 512 tokens.
+    "claude-opus-5-5": Capacidades(thinking_adaptativo=True, effort=True, vision=True, pdf=True),
+    "claude-sonnet-5-5": Capacidades(thinking_adaptativo=True, effort=True, vision=True, pdf=True),
+    "claude-haiku-5-5": Capacidades(thinking_adaptativo=True, effort=True, vision=True, pdf=True),
+    "claude-opus-5":Capacidades(thinking_adaptativo=True, effort=True, vision=True, pdf=True),
     "claude-sonnet-5": Capacidades(thinking_adaptativo=True, effort=True, vision=True, pdf=True),
     # Haiku 4.5 admitía temperature, pero desde la versión de API 2026-10-21 la
     # Messages API devuelve 400 si llega `temperature`/`top_p`/`top_k` en CUALQUIER
